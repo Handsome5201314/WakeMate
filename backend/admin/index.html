@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<!--
+  backend/admin/index.html — 醒伴 WakeMate 运营管理后台
+  单文件交互式仪表盘，接 FastAPI 后端
+  醒时科技 Wakeshift · v1.0-MVP · 2026-09
+
+  打开方式：
+    1. 双击此文件直接在浏览器打开（Mock 数据模式）
+    2. 后端起来后，去「系统配置」改 BASE_URL + Token，关掉 Mock 模式
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>醒伴 WakeMate · 运营后台</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+:root{
+  --p:#2C4A7E;--ps:#E8EEF7;--pk:#223862;--a:#F0B95C;--as:#FAF0DC;
+  --g:#45A79B;--gs:#E2F1EE;--d:#D9534F;--w:#E8A13C;
+  --i9:#1B2230;--i7:#465060;--i5:#848DA1;--i3:#C2C9D6;--i2:#E5E9F0;
+  --bg:#F5F7FA;--card:#fff;--r:12px;--sh:0 2px 8px rgba(27,34,48,.07);
+  --fn:"PingFang SC","Noto Sans SC","Microsoft YaHei",system-ui,sans-serif;
+  --fn2:"DIN Alternate","SF Pro Display",Arial,sans-serif;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:var(--fn);background:var(--bg);color:var(--i9);font-size:14px;display:flex;min-height:100vh}
+
+/* ── 侧边栏 ── */
+.sb{width:216px;background:var(--pk);display:flex;flex-direction:column;flex-shrink:0;position:fixed;top:0;left:0;height:100vh;z-index:20;overflow-y:auto}
+.sb-brand{padding:18px 16px;border-bottom:1px solid rgba(255,255,255,.1);display:flex;align-items:center;gap:10px}
+.sb-brand-txt{font-size:15px;font-weight:700;color:#fff}
+.sb-brand-sub{font-size:10px;color:rgba(255,255,255,.4);letter-spacing:.1em;margin-top:1px}
+.sb-nav{flex:1;padding:10px 0}
+.sb-sec{font-size:10px;font-weight:600;color:rgba(255,255,255,.3);letter-spacing:.1em;padding:10px 16px 4px;text-transform:uppercase}
+.ni{display:flex;align-items:center;gap:9px;padding:9px 16px;color:rgba(255,255,255,.6);cursor:pointer;transition:all .15s;border-left:3px solid transparent;font-size:13px}
+.ni:hover{background:rgba(255,255,255,.06);color:#fff}
+.ni.active{background:rgba(255,255,255,.1);color:#fff;border-left-color:var(--a)}
+.ni svg{width:15px;height:15px;flex-shrink:0}
+.sb-foot{padding:12px 16px;border-top:1px solid rgba(255,255,255,.1);font-size:11px;color:rgba(255,255,255,.3)}
+.mock-chip{display:inline-block;background:var(--a);color:var(--i9);border-radius:4px;padding:1px 6px;font-size:10px;font-weight:700;margin-left:4px}
+
+/* ── 主内容 ── */
+.main{margin-left:216px;flex:1;display:flex;flex-direction:column}
+.topbar{background:var(--card);border-bottom:1px solid var(--i2);padding:0 20px;height:50px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:10;box-shadow:var(--sh)}
+.topbar-title{font-size:15px;font-weight:600}
+.topbar-r{display:flex;align-items:center;gap:10px}
+.btn{display:inline-flex;align-items:center;gap:5px;height:32px;padding:0 12px;border-radius:7px;font-size:12px;font-weight:500;cursor:pointer;border:none;font-family:var(--fn);transition:opacity .15s}
+.btn:active{opacity:.8}
+.btn-p{background:var(--p);color:#fff}
+.btn-g{background:var(--i2);color:var(--i7)}
+.content{padding:20px;flex:1}
+.page{display:none}.page.active{display:block}
+
+/* ── KPI 卡 ── */
+.kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
+.kc{background:var(--card);border-radius:var(--r);padding:14px 16px;box-shadow:var(--sh);border:1px solid var(--i2)}
+.kc-label{font-size:11px;color:var(--i5);margin-bottom:5px;display:flex;align-items:center;gap:4px}
+.kc-val{font-family:var(--fn2);font-size:30px;font-weight:700;line-height:1}
+.kc-sub{font-size:11px;color:var(--i5);margin-top:3px}
+.kc-bar{height:3px;background:var(--i2);border-radius:2px;margin-top:8px}
+.kc-fill{height:100%;border-radius:2px;background:var(--g);transition:width .6s}
+.kc-fill.w{background:var(--w)}.kc-fill.d{background:var(--d)}
+.kc-target{font-size:10px;color:var(--i5);margin-top:3px}
+
+/* ── 图表 ── */
+.chart-row{display:grid;grid-template-columns:2fr 1fr;gap:12px;margin-bottom:12px}
+.cc{background:var(--card);border-radius:var(--r);padding:14px;box-shadow:var(--sh);border:1px solid var(--i2)}
+.cc-hd{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:4px}
+.cc-title{font-size:13px;font-weight:600}
+.cc-sub{font-size:11px;color:var(--i5)}
+.chart-box{width:100%;height:190px}
+
+/* ── 表格 ── */
+.tc{background:var(--card);border-radius:var(--r);box-shadow:var(--sh);border:1px solid var(--i2);overflow:hidden;margin-bottom:12px}
+.tc-hd{padding:10px 14px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--i2)}
+.tc-title{font-size:13px;font-weight:600}
+table{width:100%;border-collapse:collapse}
+th{background:var(--ps);color:var(--p);font-size:11px;font-weight:600;padding:7px 12px;text-align:left;border-bottom:1px solid var(--i2)}
+td{padding:8px 12px;font-size:12px;border-bottom:1px solid var(--i2)}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:#F8F9FB}
+
+/* ── 标签 ── */
+.tag{display:inline-flex;align-items:center;height:19px;padding:0 7px;border-radius:4px;font-size:10px;font-weight:600}
+.tg{background:var(--gs);color:#2C7A6F}.ta{background:var(--as);color:#8a6020}
+.tr{background:#FDECEA;color:var(--d)}.ti{background:var(--ps);color:var(--p)}
+.tx{background:var(--i2);color:var(--i7)}
+
+/* ── 告警 ── */
+.alert{border-radius:var(--r);padding:10px 14px;margin-bottom:12px;display:flex;align-items:flex-start;gap:8px;font-size:13px}
+.alert-y{background:var(--as);border:1px solid var(--a);color:#8a6020}
+.alert-g{background:var(--gs);border:1px solid var(--g);color:#2C7A6F}
+
+/* ── 设置 ── */
+.sr{display:flex;align-items:center;padding:12px 0;border-bottom:1px solid var(--i2);gap:10px}
+.sr:last-child{border-bottom:none}
+.sr-label{font-size:14px;font-weight:500;flex:1}
+.sr-sub{font-size:11px;color:var(--i5);margin-top:2px}
+.toggle{position:relative;width:42px;height:22px;cursor:pointer;flex-shrink:0}
+.toggle input{opacity:0;width:0;height:0}
+.ttrack{position:absolute;inset:0;background:var(--i3);border-radius:11px;transition:background .2s}
+.toggle input:checked+.ttrack{background:var(--p)}
+.tthumb{position:absolute;top:2px;left:2px;width:18px;height:18px;background:#fff;border-radius:50%;box-shadow:0 1px 3px rgba(0,0,0,.2);transition:transform .2s}
+.toggle input:checked~.tthumb{transform:translateX(20px)}
+.inp{height:30px;padding:0 9px;border:1.5px solid var(--i2);border-radius:6px;font-size:12px;color:var(--i9);font-family:var(--fn)}
+.inp:focus{border-color:var(--p);outline:none}
+
+/* ── 响应式 ── */
+@media(max-width:1100px){.kpi-grid{grid-template-columns:repeat(2,1fr)}.chart-row{grid-template-columns:1fr}}
+@media(max-width:768px){.sb{width:48px}.sb-brand-txt,.sb-brand-sub,.sb-sec,.ni span,.sb-foot{display:none}.main{margin-left:48px}}
+
+/* ── Spin ── */
+@keyframes spin{to{transform:rotate(360deg)}}
+.spin{animation:spin .7s linear infinite}
+</style>
+</head>
+<body>
+
+<!-- 侧边栏 -->
+<nav class="sb">
+  <div class="sb-brand">
+    <svg width="26" height="26" viewBox="0 0 200 200" fill="none">
+      <path fill-rule="evenodd" fill="rgba(255,255,255,.9)"
+        d="M88 44 a56 56 0 1 0 .01 112 a56 56 0 1 0-.01-112zM100 56a44 44 0 1 1-.01 88A44 44 0 1 1 100 56z"/>
+      <circle cx="138" cy="80" r="11" fill="#F0B95C"/>
+    </svg>
+    <div>
+      <div class="sb-brand-txt">WakeMate</div>
+      <div class="sb-brand-sub">运营后台</div>
+    </div>
+  </div>
+  <div class="sb-nav">
+    <div class="sb-sec">概览</div>
+    <div class="ni active" onclick="go('overview')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+      <span>仪表盘</span>
+    </div>
+    <div class="sb-sec">业务</div>
+    <div class="ni" onclick="go('users')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      <span>用户管理</span>
+    </div>
+    <div class="ni" onclick="go('records')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22,12 18,12 15,21 9,3 6,12 2,12"/></svg>
+      <span>服药记录</span>
+    </div>
+    <div class="sb-sec">硬件</div>
+    <div class="ni" onclick="go('devices')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="8"/><line x1="12" y1="2" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="22"/></svg>
+      <span>设备监控</span>
+    </div>
+    <div class="ni" onclick="go('shop')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>
+      <span>商城订单</span>
+    </div>
+    <div class="sb-sec">系统</div>
+    <div class="ni" onclick="go('push')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+      <span>推送监控</span>
+    </div>
+    <div class="ni" onclick="go('settings')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      <span>系统配置</span>
+    </div>
+  </div>
+  <div class="sb-foot">醒时科技 Wakeshift<br>v1.0-mvp <span class="mock-chip" id="mock-chip">MOCK</span></div>
+</nav>
+
+<!-- 主内容区 -->
+<div class="main">
+  <div class="topbar">
+    <div class="topbar-title" id="pg-title">仪表盘</div>
+    <div class="topbar-r">
+      <span id="last-refresh" style="font-size:11px;color:var(--i5)">—</span>
+      <button class="btn btn-g" onclick="refreshAll()">
+        <svg id="ri" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23,4 23,10 17,10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        刷新
+      </button>
+      <button class="btn btn-p" onclick="window.open('../index.html','_blank')">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5,3 19,12 5,21"/></svg>
+        打开原型
+      </button>
+    </div>
+  </div>
+
+  <div class="content">
+
+    <!-- 仪表盘 -->
+    <div id="page-overview" class="page active">
+      <div class="alert alert-y" id="mock-alert">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        <strong>Mock 模式</strong> · 显示内置演示数据。接入真实后端：「系统配置」→ 填写 BASE_URL + Token → 关闭 Mock。
+        <a onclick="go('settings')" style="color:#8a6020;font-weight:600;cursor:pointer;margin-left:8px">→ 配置</a>
+      </div>
+
+      <div class="kpi-grid">
+        <div class="kc">
+          <div class="kc-label"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>日活用户 DAU</div>
+          <div class="kc-val" style="color:var(--p)" id="k-dau">—</div>
+          <div class="kc-sub" id="k-dau-s">加载中</div>
+          <div class="kc-bar"><div class="kc-fill" id="k-dau-b" style="width:0"></div></div>
+          <div class="kc-target">目标：4周留存 ≥85%</div>
+        </div>
+        <div class="kc">
+          <div class="kc-label"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20,6 9,17 4,12"/></svg>服药确认率</div>
+          <div class="kc-val" style="color:var(--g)" id="k-conf">—</div>
+          <div class="kc-sub" id="k-conf-s">加载中</div>
+          <div class="kc-bar"><div class="kc-fill" id="k-conf-b" style="width:0"></div></div>
+          <div class="kc-target">🔴 红线：≥85%</div>
+        </div>
+        <div class="kc">
+          <div class="kc-label"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/></svg>推送触达率</div>
+          <div class="kc-val" style="color:#8a6020" id="k-push">—</div>
+          <div class="kc-sub" id="k-push-s">加载中</div>
+          <div class="kc-bar"><div class="kc-fill w" id="k-push-b" style="width:0"></div></div>
+          <div class="kc-target">🔴 红线：≥95%</div>
+        </div>
+        <div class="kc">
+          <div class="kc-label"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12,6 12,12 16,14"/></svg>P99 提醒延迟</div>
+          <div class="kc-val" style="color:var(--d)" id="k-p99">—</div>
+          <div class="kc-sub" id="k-p99-s">加载中</div>
+          <div class="kc-bar"><div class="kc-fill d" id="k-p99-b" style="width:0"></div></div>
+          <div class="kc-target">🔴 红线：≤10s</div>
+        </div>
+      </div>
+
+      <div class="chart-row">
+        <div class="cc">
+          <div class="cc-hd"><div><div class="cc-title">近 14 天服药确认率</div><div class="cc-sub">守夜蓝折线 + 红线 85%</div></div><span class="tag ti">14天</span></div>
+          <div class="chart-box" id="ct-trend"></div>
+        </div>
+        <div class="cc">
+          <div class="cc-hd"><div><div class="cc-title">服药结果分布</div><div class="cc-sub">按时 / 迟到 / 漏服</div></div></div>
+          <div class="chart-box" id="ct-pie" style="height:210px"></div>
+        </div>
+      </div>
+
+      <div class="chart-row" style="grid-template-columns:1fr 1fr">
+        <div class="cc">
+          <div class="cc-hd"><div><div class="cc-title">推送触达率（近7天）</div><div class="cc-sub">柱状 + 红线 95%</div></div></div>
+          <div class="chart-box" id="ct-pushrate"></div>
+        </div>
+        <div class="cc">
+          <div class="cc-hd"><div><div class="cc-title">提醒延迟 P50/P95/P99</div><div class="cc-sub">单位：毫秒</div></div></div>
+          <div class="chart-box" id="ct-latency"></div>
+        </div>
+      </div>
+
+      <div class="tc">
+        <div class="tc-hd"><div class="tc-title">⚠️ 活跃告警</div><span class="tag tr" id="alert-cnt">0</span></div>
+        <table><thead><tr><th>时间</th><th>类型</th><th>内容</th><th>级别</th></tr></thead>
+        <tbody id="tb-alerts"><tr><td colspan="4" style="text-align:center;color:var(--i5);padding:16px">加载中...</td></tr></tbody></table>
+      </div>
+    </div>
+
+    <!-- 用户管理 -->
+    <div id="page-users" class="page">
+      <div class="tc">
+        <div class="tc-hd"><div class="tc-title">用户列表</div><button class="btn btn-p" onclick="loadUsers()">刷新</button></div>
+        <table><thead><tr><th>用户</th><th>角色</th><th>注册时间</th><th>今日按时率</th><th>连续打卡</th><th>状态</th></tr></thead>
+        <tbody id="tb-users"><tr><td colspan="6" style="text-align:center;color:var(--i5);padding:16px">加载中...</td></tr></tbody></table>
+      </div>
+    </div>
+
+    <!-- 服药记录 -->
+    <div id="page-records" class="page">
+      <div class="tc">
+        <div class="tc-hd"><div class="tc-title">最近服药记录</div><button class="btn btn-p" onclick="loadRecords()">刷新</button></div>
+        <table><thead><tr><th>时间</th><th>用户</th><th>药品</th><th>计划</th><th>实际</th><th>结果</th><th>延迟</th></tr></thead>
+        <tbody id="tb-records"><tr><td colspan="7" style="text-align:center;color:var(--i5);padding:16px">加载中...</td></tr></tbody></table>
+      </div>
+    </div>
+
+    <!-- 设备监控 -->
+    <div id="page-devices" class="page">
+      <div class="tc">
+        <div class="tc-hd"><div class="tc-title">设备列表</div><button class="btn btn-p" onclick="loadDevices()">刷新</button></div>
+        <table><thead><tr><th>序列号</th><th>用户</th><th>状态</th><th>电量</th><th>药仓余量</th><th>最后心跳</th></tr></thead>
+        <tbody id="tb-devices"><tr><td colspan="6" style="text-align:center;color:var(--i5);padding:16px">加载中...</td></tr></tbody></table>
+      </div>
+    </div>
+
+    <!-- 商城订单 -->
+    <div id="page-shop" class="page">
+      <div class="tc">
+        <div class="tc-hd"><div class="tc-title">定制订单</div><button class="btn btn-p" onclick="loadOrders()">刷新</button></div>
+        <table><thead><tr><th>订单号</th><th>SKU</th><th>数量</th><th>金额</th><th>状态</th><th>下单时间</th></tr></thead>
+        <tbody id="tb-orders"><tr><td colspan="6" style="text-align:center;color:var(--i5);padding:16px">加载中...</td></tr></tbody></table>
+      </div>
+    </div>
+
+    <!-- 推送监控 -->
+    <div id="page-push" class="page">
+      <div class="kpi-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:14px">
+        <div class="kc"><div class="kc-label">今日发送</div><div class="kc-val" style="color:var(--g)" id="ps-sent">—</div><div class="kc-sub">推送条数</div></div>
+        <div class="kc"><div class="kc-label">静默抑制</div><div class="kc-val" style="color:#8a6020" id="ps-sup">—</div><div class="kc-sub">压后发送</div></div>
+        <div class="kc"><div class="kc-label">发送失败</div><div class="kc-val" style="color:var(--d)" id="ps-fail">—</div><div class="kc-sub">需排查通道</div></div>
+      </div>
+      <div class="tc">
+        <div class="tc-hd"><div class="tc-title">推送日志</div></div>
+        <table><thead><tr><th>时间</th><th>目标</th><th>类型</th><th>内容</th><th>状态</th></tr></thead>
+        <tbody id="tb-push"><tr><td colspan="5" style="text-align:center;color:var(--i5);padding:16px">加载中...</td></tr></tbody></table>
+      </div>
+    </div>
+
+    <!-- 系统配置 -->
+    <div id="page-settings" class="page">
+      <div class="tc" style="padding:18px">
+        <div class="tc-title" style="margin-bottom:14px">后端连接配置</div>
+        <div class="sr"><div><div class="sr-label">后端 API 地址</div><div class="sr-sub">FastAPI 地址，修改后刷新</div></div><input class="inp" id="cfg-url" value="http://localhost:8000" style="width:240px"></div>
+        <div class="sr"><div><div class="sr-label">管理员 JWT Token</div><div class="sr-sub">POST /api/auth/login 获取</div></div><input class="inp" id="cfg-token" placeholder="Bearer eyJ..." type="password" style="width:240px"></div>
+        <div class="sr"><div><div class="sr-label">Mock 数据模式</div><div class="sr-sub">开启时使用内置演示数据</div></div>
+          <label class="toggle"><input type="checkbox" id="cfg-mock" checked onchange="toggleMock()"><div class="ttrack"></div><div class="tthumb"></div></label>
+        </div>
+        <div class="sr"><div><div class="sr-label">自动刷新间隔（秒）</div><div class="sr-sub">仪表盘数据刷新频率</div></div><input class="inp" id="cfg-interval" value="30" type="number" min="10" max="300" style="width:80px"></div>
+        <div style="margin-top:14px;display:flex;gap:8px">
+          <button class="btn btn-p" onclick="saveConfig()">保存配置</button>
+          <button class="btn btn-g" onclick="refreshAll()">立即刷新</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+// ── 状态 ─────────────────────────────────────────────────────────
+let BASE = 'http://localhost:8000', TOKEN = '', MOCK = true, INTERVAL = 30, _timer;
+
+// ── Mock 数据 ─────────────────────────────────────────────────────
+const M = {
+  kpi:{dau:128,trend:'+12%',conf:91.4,push:96.8,p99:3240},
+  trend:{
+    x:Array.from({length:14},(_,i)=>{const d=new Date;d.setDate(d.getDate()-13+i);return(d.getMonth()+1)+'-'+(d.getDate()+'').padStart(2,'0')}),
+    y:[88,90,89,93,94,91,95,92,96,93,97,95,94,91]
+  },
+  pie:{ontime:87,late:8,missed:5},
+  pushRate:{
+    x:Array.from({length:7},(_,i)=>{const d=new Date;d.setDate(d.getDate()-6+i);return(d.getMonth()+1)+'-'+(d.getDate()+'').padStart(2,'0')}),
+    y:[97.2,95.8,98.1,96.4,94.9,97.5,96.8]
+  },
+  latency:{p50:820,p95:2100,p99:3240},
+  alerts:[
+    {t:'09:32',type:'推送延迟',msg:'FCM 平均延迟 4.2s，接近 P99 告警线',lv:'w'},
+    {t:'08:15',type:'电量告警',msg:'设备 BEAD_SN_003 电量 15%，低于阈值',lv:'d'},
+    {t:'昨日', type:'漏服',   msg:'用户 u_001 连续 2 次漏服艾司唑仑片',lv:'w'},
+  ],
+  users:[
+    {n:'李女士',id:'u_001',role:'患者',reg:'2026-09-01',rate:96,streak:12,st:'active'},
+    {n:'家属',  id:'u_002',role:'家属',reg:'2026-09-01',rate:'-',streak:'-',st:'active'},
+    {n:'张先生',id:'u_003',role:'患者',reg:'2026-09-10',rate:88,streak:5, st:'active'},
+    {n:'王女士',id:'u_004',role:'患者',reg:'2026-09-15',rate:74,streak:2, st:'at_risk'},
+  ],
+  records:[
+    {t:'22:32',u:'李女士',drug:'艾司唑仑片',sch:'22:30',act:'22:32',res:'ontime',delay:'2min'},
+    {t:'21:31',u:'李女士',drug:'褪黑素软糖',sch:'21:30',act:'21:31',res:'ontime',delay:'1min'},
+    {t:'22:30',u:'张先生',drug:'佐匹克隆',  sch:'22:30',act:null,  res:'missed', delay:'—'},
+    {t:'09:05',u:'王女士',drug:'劳拉西泮',  sch:'09:00',act:'09:35',res:'late',  delay:'35min'},
+  ],
+  devices:[
+    {sn:'BEAD_SN_001',u:'李女士',st:'online',bat:78,remain:'3/7',hb:'1分钟前'},
+    {sn:'BEAD_SN_002',u:'张先生',st:'online',bat:62,remain:'5/7',hb:'2分钟前'},
+    {sn:'BEAD_SN_003',u:'王女士',st:'online',bat:15,remain:'2/7',hb:'30秒前'},
+  ],
+  orders:[
+    {id:'ORD_A1B2',sku:'3D 定制款珠子',qty:3,price:'¥237',st:'printing', t:'2026-09-25'},
+    {id:'ORD_D4E5',sku:'标准款药珠手环',qty:1,price:'¥249',st:'delivered',t:'2026-09-20'},
+    {id:'ORD_G7H8',sku:'表链套件 20mm', qty:2,price:'¥398',st:'pending',  t:'2026-09-26'},
+  ],
+  push:{sent:24,sup:6,fail:1},
+  pushLogs:[
+    {t:'22:32',target:'家属',type:'dose_confirmed',body:'李女士已按时服用 ✓',st:'delivered'},
+    {t:'21:31',target:'家属',type:'dose_confirmed',body:'李女士已按时服用 ✓（褪黑素）',st:'delivered'},
+    {t:'22:30',target:'家属',type:'dose_missed',   body:'张先生未按时服用佐匹克隆',st:'delivered'},
+    {t:'01:15',target:'家属',type:'dose_confirmed', body:'（静默时段抑制，压后发送）',st:'suppressed'},
+  ],
+};
+
+// ── 导航 ─────────────────────────────────────────────────────────
+const titles = {overview:'仪表盘',users:'用户管理',records:'服药记录',devices:'设备监控',shop:'商城订单',push:'推送监控',settings:'系统配置'};
+function go(p){
+  document.querySelectorAll('.page').forEach(e=>e.classList.remove('active'));
+  document.querySelectorAll('.ni').forEach(e=>e.classList.remove('active'));
+  document.getElementById('page-'+p).classList.add('active');
+  document.querySelectorAll('.ni').forEach(e=>{if(e.getAttribute('onclick')===`go('${p}')`)e.classList.add('active')});
+  document.getElementById('pg-title').textContent = titles[p]||p;
+  if(p==='users')   loadUsers();
+  if(p==='records') loadRecords();
+  if(p==='devices') loadDevices();
+  if(p==='shop')    loadOrders();
+  if(p==='push')    loadPush();
+}
+
+// ── 刷新 ─────────────────────────────────────────────────────────
+async function refreshAll(){
+  const ic=document.getElementById('ri'); ic.classList.add('spin');
+  renderKPI(M.kpi);
+  renderTrend(M.trend);
+  renderPie(M.pie);
+  renderPushRate(M.pushRate);
+  renderLatency(M.latency);
+  renderAlerts(M.alerts);
+  ic.classList.remove('spin');
+  document.getElementById('last-refresh').textContent='刷新：'+new Date().toLocaleTimeString('zh-CN');
+}
+
+// ── KPI ──────────────────────────────────────────────────────────
+function renderKPI(d){
+  set('k-dau',d.dau); set('k-dau-s',`<span style="color:var(--g)">↑ ${d.trend}</span> 较昨日`,'innerHTML');
+  pct('k-dau-b',d.dau/200*100,false);
+  const c=d.conf; set('k-conf',c.toFixed(1)+'%'); set('k-conf-s',c>=85?'✓ 达标':'⚠ 低于红线');
+  pct('k-conf-b',c,c<85);
+  const pu=d.push; set('k-push',pu.toFixed(1)+'%'); set('k-push-s',pu>=95?'✓ 达标':'⚠ 接近告警线');
+  pct('k-push-b',pu,pu<95,'w');
+  const p=d.p99; set('k-p99',(p/1000).toFixed(1)+'s'); set('k-p99-s',p<=10000?'✓ 达标':'⚠ 超过红线');
+  pct('k-p99-b',p/10000*100,p>10000,'d');
+}
+function set(id,v,prop='textContent'){document.getElementById(id)[prop]=v}
+function pct(id,v,warn,cls){const el=document.getElementById(id);el.style.width=Math.min(100,v)+'%';if(warn)el.className='kc-fill '+(cls||'d')}
+
+// ── 图表 ─────────────────────────────────────────────────────────
+const charts={};
+function gc(id){if(!charts[id])charts[id]=echarts.init(document.getElementById(id));return charts[id]}
+
+function renderTrend(d){
+  gc('ct-trend').setOption({color:['#2C4A7E'],grid:{left:36,right:14,top:22,bottom:26},
+    tooltip:{trigger:'axis',confine:true,textStyle:{fontSize:11},formatter:p=>`${p[0].axisValue}<br>确认率：${p[0].value}%`},
+    xAxis:{type:'category',boundaryGap:false,data:d.x,axisLine:{lineStyle:{color:'#E5E9F0'}},axisTick:{show:false},axisLabel:{fontSize:10,color:'#848DA1'}},
+    yAxis:{type:'value',min:80,max:100,splitLine:{lineStyle:{color:'#E5E9F0'}},axisLabel:{fontSize:10,color:'#848DA1',formatter:'{value}%'}},
+    series:[{type:'line',smooth:true,symbol:'circle',symbolSize:4,data:d.y,
+      lineStyle:{color:'#2C4A7E',width:2.5},itemStyle:{color:'#F0B95C',borderColor:'#2C4A7E',borderWidth:1},
+      areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:'rgba(44,74,126,.2)'},{offset:1,color:'rgba(44,74,126,0)'}])},
+      markLine:{silent:true,symbol:'none',lineStyle:{color:'#D9534F',type:'dashed',width:1.5},data:[{yAxis:85}],label:{formatter:'红线 85%',fontSize:10,color:'#D9534F'}}}]});
+}
+
+function renderPie(d){
+  gc('ct-pie').setOption({color:['#2C4A7E','#F0B95C','#D9534F'],
+    tooltip:{trigger:'item',confine:true,textStyle:{fontSize:11},formatter:'{b}：{c}次（{d}%）'},
+    legend:{bottom:2,itemWidth:9,itemHeight:9,textStyle:{fontSize:10,color:'#465060'}},
+    series:[{type:'pie',radius:['52%','76%'],center:['50%','42%'],
+      itemStyle:{borderRadius:5,borderColor:'#fff',borderWidth:2},label:{show:false},
+      data:[{name:'按时',value:d.ontime},{name:'迟到',value:d.late},{name:'漏服',value:d.missed}]}]});
+}
+
+function renderPushRate(d){
+  gc('ct-pushrate').setOption({color:['#45A79B'],grid:{left:36,right:14,top:22,bottom:26},
+    tooltip:{trigger:'axis',confine:true,textStyle:{fontSize:11},formatter:p=>`${p[0].axisValue}<br>触达率：${p[0].value}%`},
+    xAxis:{type:'category',data:d.x,axisLine:{lineStyle:{color:'#E5E9F0'}},axisTick:{show:false},axisLabel:{fontSize:10,color:'#848DA1'}},
+    yAxis:{type:'value',min:90,max:100,splitLine:{lineStyle:{color:'#E5E9F0'}},axisLabel:{fontSize:10,color:'#848DA1',formatter:'{value}%'}},
+    series:[{type:'bar',barWidth:18,data:d.y,
+      itemStyle:{borderRadius:[4,4,0,0],color:p=>p.value>=95?'#45A79B':'#E8A13C'},
+      markLine:{silent:true,symbol:'none',lineStyle:{color:'#D9534F',type:'dashed',width:1.5},data:[{yAxis:95}],label:{formatter:'红线 95%',fontSize:10,color:'#D9534F'}}}]});
+}
+
+function renderLatency(d){
+  gc('ct-latency').setOption({color:['#2C4A7E','#F0B95C','#D9534F'],
+    grid:{left:48,right:14,top:22,bottom:26},
+    legend:{top:2,right:0,itemWidth:9,itemHeight:9,textStyle:{fontSize:10}},
+    tooltip:{trigger:'axis',confine:true,textStyle:{fontSize:11},formatter:p=>p.map(s=>`${s.seriesName}：${s.value}ms`).join('<br>')},
+    xAxis:{type:'category',data:['今日'],axisLabel:{fontSize:10,color:'#848DA1'}},
+    yAxis:{type:'value',axisLabel:{fontSize:10,color:'#848DA1',formatter:'{value}ms'},splitLine:{lineStyle:{color:'#E5E9F0'}}},
+    series:[
+      {name:'P50',type:'bar',barGap:'10%',barWidth:28,data:[d.p50],itemStyle:{borderRadius:[4,4,0,0]}},
+      {name:'P95',type:'bar',barWidth:28,data:[d.p95],itemStyle:{borderRadius:[4,4,0,0]}},
+      {name:'P99',type:'bar',barWidth:28,data:[d.p99],itemStyle:{borderRadius:[4,4,0,0]}},
+    ]});
+}
+
+function renderAlerts(a){
+  document.getElementById('alert-cnt').textContent=a.length;
+  document.getElementById('tb-alerts').innerHTML=a.length?a.map(x=>`
+    <tr><td style="color:var(--i5)">${x.t}</td>
+    <td><span class="tag ${x.lv==='d'?'tr':'ta'}">${x.type}</span></td>
+    <td>${x.msg}</td>
+    <td><span class="tag ${x.lv==='d'?'tr':'ta'}">${x.lv==='d'?'严重':'警告'}</span></td></tr>`).join('')
+    :'<tr><td colspan="4" style="text-align:center;color:var(--g);padding:14px">✓ 暂无告警</td></tr>';
+}
+
+// ── 列表加载 ─────────────────────────────────────────────────────
+function loadUsers(){
+  document.getElementById('tb-users').innerHTML=M.users.map(u=>`
+    <tr><td>${u.n} <span style="color:var(--i5);font-size:10px">${u.id}</span></td>
+    <td><span class="tag ${u.role==='患者'?'ti':'tg'}">${u.role}</span></td>
+    <td style="color:var(--i5)">${u.reg}</td>
+    <td style="font-weight:600;color:${typeof u.rate==='number'?(u.rate>=85?'var(--g)':'var(--d)'):'var(--i5)'}">${typeof u.rate==='number'?u.rate+'%':u.rate}</td>
+    <td>${u.streak!=='-'?u.streak+'天':'-'}</td>
+    <td><span class="tag ${u.st==='active'?'tg':'ta'}">${u.st==='active'?'活跃':'风险'}</span></td></tr>`).join('');
+}
+
+function loadRecords(){
+  document.getElementById('tb-records').innerHTML=M.records.map(r=>`
+    <tr><td style="color:var(--i5)">${r.t}</td><td>${r.u}</td><td>${r.drug}</td>
+    <td style="font-family:var(--fn2)">${r.sch}</td>
+    <td style="font-family:var(--fn2)">${r.act||'—'}</td>
+    <td><span class="tag ${r.res==='ontime'?'tg':r.res==='late'?'ta':'tr'}">${r.res==='ontime'?'按时':r.res==='late'?'迟到':'漏服'}</span></td>
+    <td style="color:var(--i5)">${r.delay}</td></tr>`).join('');
+}
+
+function loadDevices(){
+  document.getElementById('tb-devices').innerHTML=M.devices.map(d=>`
+    <tr><td style="font-family:var(--fn2);font-size:11px">${d.sn}</td><td>${d.u}</td>
+    <td><span class="tag ${d.st==='online'?'tg':'tr'}">${d.st==='online'?'在线':'离线'}</span></td>
+    <td style="font-weight:600;color:${d.bat<=20?'var(--d)':'var(--i9)'}">
+      ${d.bat<=20?'🪫':'🔋'} ${d.bat}%</td>
+    <td>${d.remain}</td><td style="color:var(--i5)">${d.hb}</td></tr>`).join('');
+}
+
+function loadOrders(){
+  const stMap={printing:'ta',delivered:'tg',pending:'ti',cancelled:'tr'};
+  const stLabel={printing:'打印中',delivered:'已发货',pending:'待确认',cancelled:'已取消'};
+  document.getElementById('tb-orders').innerHTML=M.orders.map(o=>`
+    <tr><td style="font-family:var(--fn2);font-size:11px">${o.id}</td><td>${o.sku}</td><td>${o.qty}</td>
+    <td style="font-weight:600">${o.price}</td>
+    <td><span class="tag ${stMap[o.st]||'tx'}">${stLabel[o.st]||o.st}</span></td>
+    <td style="color:var(--i5)">${o.t}</td></tr>`).join('');
+}
+
+function loadPush(){
+  set('ps-sent',M.push.sent); set('ps-sup',M.push.sup); set('ps-fail',M.push.fail);
+  document.getElementById('tb-push').innerHTML=M.pushLogs.map(l=>`
+    <tr><td style="color:var(--i5)">${l.t}</td><td>${l.target}</td>
+    <td><span class="tag ti">${l.type}</span></td>
+    <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${l.body}</td>
+    <td><span class="tag ${l.st==='delivered'?'tg':l.st==='suppressed'?'ta':'tr'}">${l.st==='delivered'?'已送达':l.st==='suppressed'?'静默抑制':'失败'}</span></td></tr>`).join('');
+}
+
+// ── 配置 ─────────────────────────────────────────────────────────
+function toggleMock(){
+  MOCK=document.getElementById('cfg-mock').checked;
+  document.getElementById('mock-chip').style.display=MOCK?'inline-block':'none';
+  document.getElementById('mock-alert').style.display=MOCK?'flex':'none';
+  refreshAll();
+}
+function saveConfig(){
+  BASE=document.getElementById('cfg-url').value.trim();
+  TOKEN=document.getElementById('cfg-token').value.trim();
+  MOCK=document.getElementById('cfg-mock').checked;
+  INTERVAL=parseInt(document.getElementById('cfg-interval').value)||30;
+  if(_timer)clearInterval(_timer);
+  _timer=setInterval(refreshAll,INTERVAL*1000);
+  refreshAll();
+}
+
+// ── 初始化 ───────────────────────────────────────────────────────
+refreshAll();
+_timer=setInterval(refreshAll,INTERVAL*1000);
+setTimeout(loadUsers,400);
+window.addEventListener('resize',()=>Object.values(charts).forEach(c=>c.resize()));
+</script>
+</body>
+</html>
