@@ -14,6 +14,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'core/theme/wakemate_theme.dart';
 import 'core/api/ws_client.dart';
 import 'core/api/rest_client.dart';
+import 'shared/providers/auth_provider.dart';
 import 'features/home/home_page.dart';
 import 'features/chat/chat_page.dart';
 import 'features/plan/plan_page.dart';
@@ -51,7 +52,8 @@ final _router = GoRouter(
   redirect: (context, state) async {
     if (state.uri.path == '/splash') return null;
     final prefs = await SharedPreferences.getInstance();
-    final isAuthenticated = prefs.getString(kTokenKey) != null &&
+    final isAuthenticated =
+        prefs.getString(kTokenKey) != null &&
         prefs.getString(kUserIdKey) != null;
     final isLoginRoute = state.uri.path == '/login';
 
@@ -72,11 +74,12 @@ final _router = GoRouter(
         GoRoute(path: '/plan', builder: (_, __) => const PlanPage()),
         GoRoute(path: '/stats', builder: (_, __) => const StatsPage()),
         GoRoute(
-            path: '/chat',
-            builder: (_, s) => ChatPage(
-                  scene: s.uri.queryParameters['scene'],
-                  drug: s.uri.queryParameters['drug'],
-                )),
+          path: '/chat',
+          builder: (_, s) => ChatPage(
+            scene: s.uri.queryParameters['scene'],
+            drug: s.uri.queryParameters['drug'],
+          ),
+        ),
         GoRoute(path: '/settings', builder: (_, __) => const SettingsPage()),
       ],
     ),
@@ -91,20 +94,7 @@ class WakeMateApp extends ConsumerStatefulWidget {
 }
 
 class _WakeMateAppState extends ConsumerState<WakeMateApp> {
-  @override
-  void initState() {
-    super.initState();
-    _initWsClient();
-  }
-
-  Future<void> _initWsClient() async {
-    // 启动时若已登录，初始化 WebSocket 连接
-    final prefs = await SharedPreferences.getInstance();
-    final userId = prefs.getString(kUserIdKey);
-    if (userId != null) {
-      WakeMateWsClient.instance.connect(userId: userId);
-    }
-  }
+  String? _sessionUserId;
 
   @override
   void dispose() {
@@ -114,6 +104,25 @@ class _WakeMateAppState extends ConsumerState<WakeMateApp> {
 
   @override
   Widget build(BuildContext context) {
+    ref.listen(authProvider, (previous, next) {
+      final auth = next.valueOrNull;
+      if (auth == null) return;
+      final userId = auth.isAuthenticated ? auth.userId : null;
+      if (userId != _sessionUserId) {
+        _sessionUserId = userId;
+        // FutureProviders must never retain the previous patient's data.
+        ref.invalidate(dioProvider);
+        ref.invalidate(apiProvider);
+        WakeMateWsClient.instance.disconnect();
+        if (userId != null) {
+          WakeMateWsClient.instance.connect(userId: userId);
+        }
+      }
+      if (auth.status == AuthStatus.unauthenticated &&
+          _router.state.uri.path != '/splash') {
+        _router.go('/login');
+      }
+    });
     return MaterialApp.router(
       title: '醒伴 WakeMate',
       debugShowCheckedModeBanner: false,
@@ -139,38 +148,39 @@ class _MainShellState extends State<MainShell> {
       path: '/home',
       label: '首页',
       icon: Icons.home_outlined,
-      activeIcon: Icons.home
+      activeIcon: Icons.home,
     ),
     (
       path: '/plan',
       label: '方案',
       icon: Icons.calendar_today_outlined,
-      activeIcon: Icons.calendar_today
+      activeIcon: Icons.calendar_today,
     ),
     (
       path: '/stats',
       label: '数据',
       icon: Icons.bar_chart_outlined,
-      activeIcon: Icons.bar_chart
+      activeIcon: Icons.bar_chart,
     ),
     (
       path: '/chat',
       label: '小醒',
       icon: Icons.chat_bubble_outline,
-      activeIcon: Icons.chat_bubble
+      activeIcon: Icons.chat_bubble,
     ),
     (
       path: '/settings',
       label: '我的',
       icon: Icons.person_outline,
-      activeIcon: Icons.person
+      activeIcon: Icons.person,
     ),
   ];
 
   int _indexForPath(String path) {
     // Shell 内页面可能通过深链进入；高亮状态必须跟随当前路由。
     final index = _tabs.indexWhere(
-        (tab) => path == tab.path || path.startsWith('${tab.path}/'));
+      (tab) => path == tab.path || path.startsWith('${tab.path}/'),
+    );
     return index < 0 ? 0 : index;
   }
 
@@ -196,15 +206,17 @@ class _MainShellState extends State<MainShell> {
               context.go(_tabs[i].path);
             },
             items: _tabs
-                .map((t) => BottomNavigationBarItem(
-                      icon: t.path == '/chat'
-                          ? const _XiaoxingTabIcon()
-                          : Icon(t.icon),
-                      activeIcon: t.path == '/chat'
-                          ? const _XiaoxingTabIcon(selected: true)
-                          : Icon(t.activeIcon),
-                      label: t.label,
-                    ))
+                .map(
+                  (t) => BottomNavigationBarItem(
+                    icon: t.path == '/chat'
+                        ? const _XiaoxingTabIcon()
+                        : Icon(t.icon),
+                    activeIcon: t.path == '/chat'
+                        ? const _XiaoxingTabIcon(selected: true)
+                        : Icon(t.activeIcon),
+                    label: t.label,
+                  ),
+                )
                 .toList(),
           ),
         ),

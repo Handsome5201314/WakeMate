@@ -1,0 +1,6 @@
+.git
+.env
+flutter_app
+backend
+server/.venv
+**/__pycache__

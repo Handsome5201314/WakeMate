@@ -1,0 +1,47 @@
+services:
+  api:
+    environment:
+      FORWARDED_ALLOW_IPS: 172.30.90.2
+    networks:
+      default: {}
+      public-edge:
+        ipv4_address: 172.30.90.3
+  public-tunnel:
+    build: ./tools/public-tunnel
+    image: wakemate-public-tunnel:1.0
+    environment:
+      WAKEMATE_SSH_HOST: ${WAKEMATE_SSH_HOST:?required}
+      WAKEMATE_SSH_USER: ${WAKEMATE_SSH_USER:?required}
+    volumes:
+      - type: bind
+        source: ${WAKEMATE_SSH_KEY_PATH:?required}
+        target: /ssh-source/private_key
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${WAKEMATE_SSH_KNOWN_HOSTS_PATH:?required}
+        target: /ssh-source/known_hosts
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /run/ssh:rw,noexec,nosuid,size=1m,mode=0700
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks:
+      public-edge:
+        ipv4_address: 172.30.90.2
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, /usr/local/bin/healthcheck.sh]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 20s
+networks:
+  public-edge:
+    ipam:
+      config:
+        - subnet: 172.30.90.0/29

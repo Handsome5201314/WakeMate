@@ -1,14 +1,13 @@
-// lib/features/device/device_page.dart
-// 硬件设备页：醒伴药珠 + 桌面摆件 + BLE 管理
+// 硬件设备页：真实设备列表与一次性绑定码认领
 // 醒伴 WakeMate Flutter APP
 
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../core/theme/wakemate_theme.dart';
 import '../../core/api/rest_client.dart';
-
-enum _ToyLight { pending, done, missed }
+import '../../core/theme/wakemate_theme.dart';
+import '../../shared/providers/auth_provider.dart';
 
 class DevicePage extends ConsumerStatefulWidget {
   const DevicePage({super.key});
@@ -17,731 +16,440 @@ class DevicePage extends ConsumerStatefulWidget {
   ConsumerState<DevicePage> createState() => _DevicePageState();
 }
 
-class _DevicePageState extends ConsumerState<DevicePage>
-    with TickerProviderStateMixin {
-  bool _connected = false;
-  bool _hasDevice = false;
-  int? _battery;
-  int? _beadRemain;
-  int? _beadTotal;
-  bool _loadingDevice = true;
-  String? _deviceError;
-  _ToyLight _lightMode = _ToyLight.pending;
-
-  late AnimationController _breatheCtrl;
-  late AnimationController _flashCtrl;
-  late Animation<double> _breatheAnim;
-  late Animation<double> _flashAnim;
+class _DevicePageState extends ConsumerState<DevicePage> {
+  final _deviceSnController = TextEditingController();
+  final _claimCodeController = TextEditingController();
+  List<Map<String, dynamic>> _devices = const [];
+  bool _loading = true;
+  bool _claiming = false;
+  String? _loadError;
+  String? _claimError;
+  int _loadGeneration = 0;
+  int _sessionGeneration = 0;
+  String? _accountId;
+  CancelToken? _claimCancelToken;
+  late final ProviderSubscription<AsyncValue<AuthState>> _authSubscription;
 
   @override
   void initState() {
     super.initState();
-    _breatheCtrl = AnimationController(
-        vsync: this, duration: const Duration(milliseconds: 2000))
-      ..repeat(reverse: true);
-    _flashCtrl = AnimationController(
-        vsync: this, duration: const Duration(milliseconds: 1500))
-      ..repeat(reverse: true);
-    _breatheAnim = Tween<double>(begin: 0.4, end: 1.0).animate(
-        CurvedAnimation(parent: _breatheCtrl, curve: Curves.easeInOut));
-    _flashAnim = Tween<double>(begin: 0.1, end: 1.0)
-        .animate(CurvedAnimation(parent: _flashCtrl, curve: Curves.easeInOut));
-    _loadDevice();
-  }
-
-  Future<void> _loadDevice() async {
-    try {
-      final devices = await ref.read(apiProvider).getDevices();
-      if (!mounted) return;
-      Map<String, dynamic>? device;
-      for (final item in devices) {
-        if (item is Map<String, dynamic>) {
-          device = item;
-          break;
-        }
-      }
-      if (device == null) {
-        setState(() {
-          _loadingDevice = false;
-          _deviceError = null;
-          _hasDevice = false;
-          _connected = false;
-          _battery = null;
-          _beadRemain = null;
-          _beadTotal = null;
-        });
-        return;
-      }
-      final rawState = device['state'];
-      final state =
-          rawState is Map ? Map<String, dynamic>.from(rawState) : device;
+    _authSubscription = ref.listenManual(authProvider, (_, next) {
+      final account = next is AsyncData<AuthState> ? next.value : null;
+      final accountId =
+          account?.isAuthenticated == true ? account?.userId : null;
+      if (accountId == _accountId) return;
+      _sessionGeneration++;
+      _loadGeneration++;
+      _claimCancelToken?.cancel('WakeMate account changed');
+      _claimCancelToken = null;
+      _accountId = accountId;
+      _deviceSnController.clear();
+      _claimCodeController.clear();
       setState(() {
-        _loadingDevice = false;
-        _deviceError = null;
-        _hasDevice = true;
-        _connected = _isDeviceOnline(state);
-        _battery = (state?['battery'] as num?)?.toInt();
-        _beadTotal = (device?['bead_total'] as num?)?.toInt();
-        _beadRemain = (state?['bead_remain'] as num?)?.toInt();
+        _devices = const [];
+        _claiming = false;
+        _loading = false;
+        _loadError = null;
+        _claimError = null;
       });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _loadingDevice = false;
-        _deviceError = '设备状态加载失败，请检查网络后重试';
-        _hasDevice = false;
-        _connected = false;
-        _battery = null;
-        _beadRemain = null;
-        _beadTotal = null;
-      });
-    }
+      if (accountId != null) _loadDevices();
+    }, fireImmediately: true);
   }
 
   @override
   void dispose() {
-    _breatheCtrl.dispose();
-    _flashCtrl.dispose();
+    _authSubscription.close();
+    _claimCancelToken?.cancel('Device page disposed');
+    _deviceSnController.dispose();
+    _claimCodeController.dispose();
     super.dispose();
   }
 
-  Color get _lightColor {
-    switch (_lightMode) {
-      case _ToyLight.pending:
-        return WMColors.brandAccent;
-      case _ToyLight.done:
-        return WMColors.brandSecondary;
-      case _ToyLight.missed:
-        return WMColors.brandAccent;
+  Future<void> _loadDevices() async {
+    final accountId = _accountId;
+    if (accountId == null) return;
+    final generation = ++_loadGeneration;
+    final session = _sessionGeneration;
+    if (mounted) setState(() => _loading = true);
+    try {
+      final result = await ref.read(apiProvider).getDevices();
+      if (!_isCurrentSession(accountId, session) ||
+          generation != _loadGeneration) {
+        return;
+      }
+      if (result.any((item) => item is! Map<String, dynamic>)) {
+        throw const FormatException('设备列表响应格式不正确');
+      }
+      final devices =
+          result.cast<Map<String, dynamic>>().toList(growable: false);
+      setState(() {
+        _devices = devices;
+        _loading = false;
+        _loadError = null;
+      });
+    } catch (_) {
+      if (!_isCurrentSession(accountId, session) ||
+          generation != _loadGeneration) {
+        return;
+      }
+      setState(() {
+        _loading = false;
+        _loadError = '设备列表加载失败，请检查网络后重试';
+      });
     }
   }
 
+  Future<void> _claimDevice() async {
+    if (_claiming) return;
+    final accountId = _accountId;
+    if (accountId == null) return;
+    final session = _sessionGeneration;
+    final deviceSn = _deviceSnController.text.trim();
+    final claimCode = _claimCodeController.text.trim();
+    if (deviceSn.isEmpty || claimCode.isEmpty) {
+      setState(() => _claimError = '请填写设备序列号和绑定码');
+      return;
+    }
+    if (deviceSn.length > 64 ||
+        claimCode.length < 8 ||
+        claimCode.length > 128) {
+      setState(() => _claimError = '序列号最多 64 位，绑定码应为 8–128 位。');
+      return;
+    }
+    FocusScope.of(context).unfocus();
+    final cancelToken = CancelToken();
+    _claimCancelToken = cancelToken;
+    setState(() {
+      _claiming = true;
+      _claimError = null;
+    });
+    try {
+      await ref.read(apiProvider).bindDevice(
+            deviceSn: deviceSn,
+            claimCode: claimCode,
+            cancelToken: cancelToken,
+          );
+      if (!_isCurrentSession(accountId, session)) return;
+      final messenger = ScaffoldMessenger.of(context);
+      _deviceSnController.clear();
+      _claimCodeController.clear();
+      _claimCancelToken = null;
+      setState(() => _claiming = false);
+      messenger.showSnackBar(
+        const SnackBar(content: Text('设备已绑定到当前醒伴账号')),
+      );
+      await _loadDevices();
+    } catch (error) {
+      if (!_isCurrentSession(accountId, session)) return;
+      setState(() {
+        _claimCancelToken = null;
+        _claiming = false;
+        _claimError = _claimErrorMessage(error);
+      });
+    }
+  }
+
+  bool _isCurrentSession(String accountId, int generation) =>
+      mounted && _accountId == accountId && _sessionGeneration == generation;
+
+  String _claimErrorMessage(Object error) {
+    if (error is DioException) {
+      final status = error.response?.statusCode;
+      if (status == 401) return '登录已过期，请重新登录后再绑定设备。';
+      if (status == 403) return '绑定码无效、已使用或已过期，请向管理员重新获取。';
+      if (status == 422) return '设备序列号或绑定码格式不正确，请检查后重试。';
+      if (status != null && status >= 500) return '服务暂时不可用，请稍后重试。';
+      if (error.type == DioExceptionType.connectionError ||
+          error.type == DioExceptionType.connectionTimeout ||
+          error.type == DioExceptionType.sendTimeout ||
+          error.type == DioExceptionType.receiveTimeout) {
+        return '网络连接失败，请检查网络后重试。';
+      }
+    }
+    if (error is StateError) return error.message;
+    return '设备绑定失败，请稍后重试。';
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: WMColors.bgPage,
-      appBar: AppBar(title: const Text('硬件设备')),
-      body: _loadingDevice
-          ? const Center(child: CircularProgressIndicator())
-          : ListView(
-              padding: const EdgeInsets.all(WMSpacing.md),
-              children: [
-                if (_deviceError != null)
-                  _buildDeviceError()
-                else if (!_hasDevice)
-                  _buildDeviceEmpty()
-                else ...[
-                  if (!_connected) _buildDeviceEmpty(),
-                  _buildBeadCard(),
-                  const SizedBox(height: 12),
-                  _buildDollCard(),
-                  const SizedBox(height: 12),
-                  _buildMiniBadge(),
-                  const SizedBox(height: 80),
-                ],
-              ],
+    return PopScope(
+      canPop: !_claiming,
+      child: Scaffold(
+        backgroundColor: WMColors.bgPage,
+        appBar: AppBar(title: const Text('硬件设备')),
+        body: RefreshIndicator(
+          onRefresh: () async {
+            if (!_claiming) await _loadDevices();
+          },
+          child: ListView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.fromLTRB(
+              WMSpacing.md,
+              WMSpacing.md,
+              WMSpacing.md,
+              WMSpacing.xl,
             ),
-    );
-  }
-
-  Widget _buildDeviceError() {
-    return Container(
-      margin: const EdgeInsets.only(bottom: WMSpacing.md),
-      padding: const EdgeInsets.all(WMSpacing.md),
-      decoration: BoxDecoration(
-        color: WMColors.dangerSoft,
-        borderRadius: WMRadius.md,
-        border: Border.all(color: WMColors.danger.withOpacity(0.35)),
-      ),
-      child: Row(
-        children: [
-          const Icon(Icons.cloud_off_outlined, color: WMColors.danger),
-          const SizedBox(width: WMSpacing.sm),
-          const Expanded(
-              child: Text('设备状态暂不可用，请稍后重试',
-                  style: TextStyle(color: WMColors.danger))),
-          TextButton(onPressed: _loadDevice, child: const Text('重试')),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildDeviceEmpty() {
-    return Container(
-      margin: const EdgeInsets.only(bottom: WMSpacing.md),
-      padding: const EdgeInsets.all(WMSpacing.md),
-      decoration: BoxDecoration(
-        color: WMColors.brandPrimarySoft,
-        borderRadius: WMRadius.md,
-      ),
-      child: const Row(
-        children: [
-          Icon(Icons.bluetooth_disabled_outlined, color: WMColors.brandPrimary),
-          SizedBox(width: WMSpacing.sm),
-          Expanded(
-              child: Text('还没有在线的醒伴药珠，请先完成设备配对。',
-                  style: TextStyle(color: WMColors.brandPrimary))),
-        ],
-      ),
-    );
-  }
-
-  // ── 醒伴药珠状态卡 ──────────────────────────────────────────────
-  Widget _buildBeadCard() {
-    return Container(
-      padding: const EdgeInsets.all(WMSpacing.md),
-      decoration: BoxDecoration(
-        color: WMColors.bgCard,
-        borderRadius: WMRadius.lg,
-        boxShadow: WMShadows.card,
-      ),
-      child: Column(
-        children: [
-          Row(
             children: [
-              Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  color: WMColors.brandPrimarySoft,
-                  borderRadius: WMRadius.sm,
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.all(5),
-                  child: Image.asset(
-                    'assets/images/wakemate_beads.png',
-                    fit: BoxFit.contain,
-                    semanticLabel: '醒伴药珠',
-                  ),
-                ),
-              ),
-              const SizedBox(width: 10),
-              const Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('醒伴药珠',
-                      style:
-                          TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-                  Text('ESP32-S3 · 醒时科技',
-                      style: TextStyle(fontSize: 12, color: WMColors.ink500)),
-                ],
-              ),
-              const Spacer(),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                decoration: BoxDecoration(
-                  color: _connected
-                      ? WMColors.brandSecondarySoft
-                      : WMColors.brandAccentSoft,
-                  borderRadius: WMRadius.pill,
-                ),
-                child: Text(
-                  _connected ? '已连接' : '未连接',
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w500,
-                    color: _connected
-                        ? const Color(0xFF2C7A6F)
-                        : const Color(0xFF8a6020),
-                  ),
-                ),
-              ),
+              if (_accountId == null)
+                const Padding(
+                  padding: EdgeInsets.all(WMSpacing.lg),
+                  child: Text('请先登录醒伴账号，再查看或绑定设备。'),
+                )
+              else ...[
+                _buildClaimCard(),
+                const SizedBox(height: WMSpacing.md),
+                if (_loading)
+                  const Padding(
+                    padding: EdgeInsets.all(WMSpacing.xl),
+                    child: Center(child: CircularProgressIndicator()),
+                  )
+                else if (_loadError != null)
+                  _buildLoadError()
+                else
+                  _buildDeviceList(),
+              ],
             ],
           ),
-
-          // 刻度环可视化
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 16),
-            child: _BeadRing(remain: _beadRemain, total: _beadTotal),
-          ),
-
-          // 信息行
-          _infoRow(
-            '连接状态',
-            _connected ? '已连接' : '未连接',
-            trailing: OutlinedButton(
-              onPressed: _loadDevice,
-              style: ElevatedButton.styleFrom(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                minimumSize: Size.zero,
-                textStyle: const TextStyle(fontSize: 12),
-              ),
-              child: const Text('刷新', style: TextStyle(fontSize: 12)),
-            ),
-          ),
-          const Divider(height: 1),
-          _infoRow(
-            '电量',
-            _battery == null ? '--' : '$_battery%',
-            valueWidget: Row(
-              children: [
-                Text(_battery == null ? '--' : '$_battery%',
-                    style: TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w600,
-                      color: _battery != null && _battery! <= 20
-                          ? WMColors.danger
-                          : WMColors.ink900,
-                    )),
-                if (_battery != null) ...[
-                  const SizedBox(width: 8),
-                  SizedBox(
-                    width: 80,
-                    child: LinearProgressIndicator(
-                      value: _battery! / 100,
-                      backgroundColor: WMColors.ink200,
-                      color: _battery! <= 20
-                          ? WMColors.danger
-                          : WMColors.brandSecondary,
-                      borderRadius: WMRadius.pill,
-                      minHeight: 6,
-                    ),
-                  ),
-                ],
-              ],
-            ),
-            trailing: kMockMode && _battery != null
-                ? OutlinedButton(
-                    onPressed: () {
-                      setState(() =>
-                          _battery = (_battery! - 10).clamp(0, 100).toInt());
-                      if (_battery! <= 20) _showSnack('电量低，请及时充电');
-                    },
-                    style: OutlinedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 8),
-                      minimumSize: Size.zero,
-                      textStyle: const TextStyle(fontSize: 12),
-                    ),
-                    child: const Text('-10%', style: TextStyle(fontSize: 12)),
-                  )
-                : null,
-          ),
-          const Divider(height: 1),
-          _infoRow(
-            '药仓余量',
-            '${_beadRemain ?? '--'} / ${_beadTotal ?? '--'} 格',
-            trailing: kMockMode && _beadRemain != null
-                ? ElevatedButton(
-                    onPressed: () {
-                      if (_beadRemain! > 0)
-                        setState(() => _beadRemain = _beadRemain! - 1);
-                      _showSnack('药珠开盖事件已触发；开盖不等于服药确认');
-                    },
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: WMColors.brandAccent,
-                      foregroundColor: WMColors.ink900,
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 8),
-                      minimumSize: Size.zero,
-                      textStyle: const TextStyle(fontSize: 12),
-                    ),
-                    child: const Text('模拟开盖', style: TextStyle(fontSize: 12)),
-                  )
-                : null,
-          ),
-
-          // 架构注释提示
-          Container(
-            margin: const EdgeInsets.only(top: 12),
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: WMColors.brandAccentSoft,
-              borderRadius: WMRadius.sm,
-              border: Border.all(color: WMColors.brandAccent.withOpacity(0.4)),
-            ),
-            child: const Row(
-              children: [
-                Icon(Icons.info_outline, size: 14, color: Color(0xFF8a6020)),
-                SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    '药盒本体不联网 · 用药计划固化本地 RTC · 联网仅用于事件同步',
-                    style: TextStyle(fontSize: 12, color: Color(0xFF8a6020)),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }
 
-  // ── 小醒潮玩公仔状态卡 ────────────────────────────────────────────
-  Widget _buildDollCard() {
-    return Container(
-      padding: const EdgeInsets.all(WMSpacing.md),
-      decoration: BoxDecoration(
-        color: WMColors.bgCard,
-        borderRadius: WMRadius.lg,
-        boxShadow: WMShadows.card,
-      ),
-      child: Column(
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                    color: WMColors.brandAccentSoft, borderRadius: WMRadius.sm),
-                child: Padding(
-                  padding: const EdgeInsets.all(4),
-                  child: Image.asset(
-                    'assets/images/xiaoxing_doll.png',
-                    fit: BoxFit.contain,
-                    semanticLabel: '小醒潮玩公仔',
-                  ),
-                ),
-              ),
-              const SizedBox(width: 10),
-              const Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('小醒潮玩公仔',
-                      style:
-                          TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-                  Text('实体灯光状态映射',
-                      style: TextStyle(fontSize: 12, color: WMColors.ink500)),
-                ],
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-
-          // 公仔灯光可视化
-          AnimatedBuilder(
-            animation: _lightMode == _ToyLight.done ? _breatheAnim : _flashAnim,
-            builder: (_, child) {
-              double opacity = _lightMode == _ToyLight.pending
-                  ? 1.0
-                  : _lightMode == _ToyLight.done
-                      ? _breatheAnim.value
-                      : _flashAnim.value;
-              return Stack(
-                alignment: Alignment.center,
-                children: [
-                  Container(
-                    width: 80,
-                    height: 80,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: _lightColor.withOpacity(opacity * 0.3),
-                    ),
-                  ),
-                  Image.asset(
-                    'assets/images/xiaoxing_doll.png',
-                    width: 72,
-                    height: 72,
-                    fit: BoxFit.contain,
-                    semanticLabel: '小醒潮玩公仔状态',
-                  ),
-                ],
-              );
-            },
-          ),
-          const SizedBox(height: 12),
-
-          // 当前状态标签
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-            decoration: BoxDecoration(
-              color: _lightMode == _ToyLight.done
-                  ? WMColors.brandSecondarySoft
-                  : _lightMode == _ToyLight.missed
-                      ? const Color(0xFFFFECEB)
-                      : WMColors.brandAccentSoft,
-              borderRadius: WMRadius.pill,
-            ),
-            child: Text(
-              !kMockMode
-                  ? '状态待同步'
-                  : _lightMode == _ToyLight.pending
-                      ? '待服药'
-                      : _lightMode == _ToyLight.done
-                          ? '已完成'
-                          : '漏服提醒',
-              style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w500,
-                color: !kMockMode
-                    ? WMColors.ink500
-                    : _lightMode == _ToyLight.done
-                        ? const Color(0xFF2C7A6F)
-                        : _lightMode == _ToyLight.missed
-                            ? WMColors.danger
-                            : const Color(0xFF8a6020),
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-
-          // 状态切换按钮
-          if (kMockMode)
-            Row(
-              children: _ToyLight.values.map((mode) {
-                final isActive = _lightMode == mode;
-                final labels = ['待服药', '已完成', '漏服提醒'];
-                final subs = ['暖金常亮', '晨雾青呼吸', '暖金慢闪'];
-                final idx = _ToyLight.values.indexOf(mode);
-                return Expanded(
-                  child: GestureDetector(
-                    onTap: () {
-                      setState(() => _lightMode = mode);
-                      _showSnack('公仔灯光已切换：${labels[idx]}（${subs[idx]}）');
-                    },
-                    child: Container(
-                      margin: EdgeInsets.only(left: idx == 0 ? 0 : 6),
-                      padding: const EdgeInsets.symmetric(vertical: 10),
-                      decoration: BoxDecoration(
-                        border: Border.all(
-                          color: isActive ? _lightColor : WMColors.ink200,
-                          width: isActive ? 1.5 : 1,
-                        ),
-                        borderRadius: WMRadius.md,
-                        color: isActive
-                            ? _lightColor.withOpacity(0.1)
-                            : WMColors.bgCard,
-                      ),
-                      child: Column(
-                        children: [
-                          Container(
-                            width: 10,
-                            height: 10,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: [
-                                WMColors.brandAccent,
-                                WMColors.brandSecondary,
-                                WMColors.brandAccent
-                              ][idx],
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(labels[idx],
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w500,
-                                color: isActive
-                                    ? WMColors.ink900
-                                    : WMColors.ink700,
-                              )),
-                          Text(subs[idx],
-                              style: const TextStyle(
-                                  fontSize: 10, color: WMColors.ink500)),
-                        ],
-                      ),
-                    ),
-                  ),
-                );
-              }).toList(),
-            )
-          else
+  Widget _buildClaimCard() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(WMSpacing.md),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('绑定醒伴设备',
+                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 6),
             const Text(
-              '灯光状态由设备事件同步，当前页面不会伪造硬件状态。',
-              style: TextStyle(fontSize: 12, color: WMColors.ink500),
+              '从管理员处获取设备序列号和 24 小时一次性绑定码。Wi-Fi 开发板无需蓝牙配对；小智激活与醒伴设备认领分别完成。',
+              style: TextStyle(fontSize: 13, color: WMColors.ink500),
             ),
-        ],
+            const SizedBox(height: WMSpacing.md),
+            TextField(
+              key: const ValueKey('device-sn-field'),
+              controller: _deviceSnController,
+              enabled: !_claiming,
+              textInputAction: TextInputAction.next,
+              maxLength: 64,
+              decoration: const InputDecoration(
+                labelText: '设备序列号',
+                hintText: '例如 WM-PILL-001',
+                counterText: '',
+              ),
+            ),
+            const SizedBox(height: WMSpacing.sm),
+            TextField(
+              key: const ValueKey('claim-code-field'),
+              controller: _claimCodeController,
+              enabled: !_claiming,
+              maxLength: 128,
+              obscureText: true,
+              onSubmitted: (_) => _claimDevice(),
+              decoration: const InputDecoration(
+                labelText: '一次性绑定码',
+                hintText: '24 小时内有效',
+                counterText: '',
+              ),
+            ),
+            if (_claimError != null) ...[
+              const SizedBox(height: WMSpacing.sm),
+              Text(_claimError!,
+                  key: const ValueKey('claim-error'),
+                  style: const TextStyle(color: WMColors.danger, fontSize: 13)),
+            ],
+            const SizedBox(height: WMSpacing.sm),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                key: const ValueKey('claim-device-button'),
+                onPressed: _claiming ? null : _claimDevice,
+                icon: _claiming
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.link),
+                label: Text(_claiming ? '绑定中…' : '绑定设备'),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 
-  Widget _buildMiniBadge() {
-    return Container(
-      padding: const EdgeInsets.all(WMSpacing.md),
-      decoration: BoxDecoration(
-        color: WMColors.bgCard,
-        borderRadius: WMRadius.lg,
-        boxShadow: WMShadows.card,
+  Widget _buildLoadError() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(WMSpacing.md),
+        child: Row(
+          children: [
+            const Icon(Icons.cloud_off_outlined, color: WMColors.danger),
+            const SizedBox(width: WMSpacing.sm),
+            const Expanded(
+                child: Text('设备列表加载失败，请检查网络后重试',
+                    style: TextStyle(color: WMColors.danger))),
+            TextButton(onPressed: _loadDevices, child: const Text('重试')),
+          ],
+        ),
       ),
-      child: Row(
-        children: [
-          Image.asset(
-            'assets/images/xiaoxing_login.png',
-            width: 40,
-            height: 40,
-            fit: BoxFit.contain,
-            semanticLabel: '小醒 IP 形象',
+    );
+  }
+
+  Widget _buildDeviceList() {
+    if (_devices.isEmpty) {
+      return Card(
+        child: Padding(
+          padding: const EdgeInsets.all(WMSpacing.lg),
+          child: Column(
+            children: const [
+              Icon(Icons.devices_other_outlined,
+                  size: 40, color: WMColors.ink500),
+              SizedBox(height: WMSpacing.sm),
+              Text('当前账号还没有绑定醒伴设备',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
+              SizedBox(height: WMSpacing.xs),
+              Text('绑定后，设备心跳和用药计划会显示在这里。',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 13, color: WMColors.ink500)),
+            ],
           ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+        ),
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('已绑定设备（${_devices.length}）',
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+        const SizedBox(height: WMSpacing.sm),
+        ..._devices.asMap().entries.map(
+              (entry) => Padding(
+                padding: EdgeInsets.only(
+                    bottom:
+                        entry.key == _devices.length - 1 ? 0 : WMSpacing.sm),
+                child: _buildDeviceCard(entry.value),
+              ),
+            ),
+      ],
+    );
+  }
+
+  Widget _buildDeviceCard(Map<String, dynamic> device) {
+    final state = device['state'] is Map
+        ? Map<String, dynamic>.from(device['state'] as Map)
+        : const <String, dynamic>{};
+    final status = _statusLabel(device, state);
+    final online = status == '在线';
+    final type = _deviceTypeLabel(device['device_type']);
+    final firmware = _stringOrNull(device['firmware_ver']) ?? '未知';
+    final battery = state['battery'] is num ? '${state['battery']}%' : '未知';
+    final lastSync = _formatDate(device['last_sync_at']);
+    return Card(
+      key: ValueKey('device-card-${device['id'] ?? device['device_sn']}'),
+      child: Padding(
+        padding: const EdgeInsets.all(WMSpacing.md),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
               children: [
-                const Text('醒伴 WakeMate',
-                    style:
-                        TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
-                Row(
-                  children: [
-                    Container(
-                      width: 6,
-                      height: 6,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: _connected
-                            ? WMColors.brandSecondary
-                            : WMColors.ink300,
-                      ),
-                    ),
-                    const SizedBox(width: 4),
-                    Text('药珠 ${_connected ? "在线" : "离线"}',
-                        style: const TextStyle(
-                            fontSize: 12, color: WMColors.ink500)),
-                    const SizedBox(width: 4),
-                    Icon(
-                      _battery != null && _battery! <= 20
-                          ? Icons.battery_alert_outlined
-                          : Icons.battery_5_bar_outlined,
-                      size: 14,
-                      color: _battery != null && _battery! <= 20
-                          ? WMColors.danger
-                          : WMColors.brandSecondary,
-                    ),
-                    const SizedBox(width: 2),
-                    Text('${_battery ?? "--"}%',
-                        style: const TextStyle(
-                            fontSize: 12, color: WMColors.ink500)),
-                  ],
+                const Icon(Icons.devices_other_outlined,
+                    color: WMColors.brandPrimary),
+                const SizedBox(width: WMSpacing.sm),
+                Expanded(
+                  child: Text(type,
+                      style: const TextStyle(
+                          fontSize: 16, fontWeight: FontWeight.w600)),
                 ),
+                _statusBadge(status, online),
               ],
             ),
-          ),
-          const Text('伴醒同行',
-              style: TextStyle(fontSize: 12, color: WMColors.ink500)),
-        ],
+            const Divider(height: WMSpacing.lg),
+            _detailRow('设备序列号', _stringOrNull(device['device_sn']) ?? '未知',
+                mono: true),
+            _detailRow('固件版本', firmware),
+            _detailRow('电量', battery),
+            _detailRow('最近同步', lastSync),
+          ],
+        ),
       ),
     );
   }
 
-  Widget _infoRow(String label, String value,
-      {Widget? valueWidget, Widget? trailing}) {
+  Widget _statusBadge(String status, bool online) {
+    final color = online ? WMColors.brandSecondary : WMColors.ink500;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+      decoration: BoxDecoration(
+          color: online ? WMColors.brandSecondarySoft : WMColors.ink200,
+          borderRadius: WMRadius.pill),
+      child: Text(status,
+          style: TextStyle(
+              fontSize: 12, color: color, fontWeight: FontWeight.w500)),
+    );
+  }
+
+  Widget _detailRow(String label, String value, {bool mono = false}) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 10),
+      padding: const EdgeInsets.symmetric(vertical: 5),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SizedBox(
-              width: 72,
-              child: Text(label,
-                  style:
-                      const TextStyle(fontSize: 14, color: WMColors.ink500))),
+              width: 88,
+              child:
+                  Text(label, style: const TextStyle(color: WMColors.ink500))),
           Expanded(
-              child: valueWidget ??
-                  Text(value,
-                      style: const TextStyle(
-                          fontSize: 15, fontWeight: FontWeight.w600))),
-          if (trailing != null) trailing,
+              child: Text(value,
+                  textAlign: TextAlign.end,
+                  style: TextStyle(
+                      fontFamily: mono ? 'monospace' : null,
+                      color: WMColors.ink900))),
         ],
       ),
     );
   }
 
-  void _showSnack(String msg) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(msg), duration: const Duration(seconds: 2)),
-    );
+  String _statusLabel(Map<String, dynamic> device, Map<String, dynamic> state) {
+    final hasHeartbeat =
+        device['last_sync_at'] != null || state['last_heartbeat'] != null;
+    final raw = state['status']?.toString().toLowerCase();
+    if (!hasHeartbeat) return '尚未上报';
+    if (raw == 'online') return '在线';
+    return '离线';
   }
 
-  bool _isDeviceOnline(Map<String, dynamic>? state) {
-    if (state == null) return false;
-    if (state['status']?.toString() == 'online') return true;
-    final rawHeartbeat = state['last_heartbeat']?.toString();
-    final heartbeat =
-        rawHeartbeat == null ? null : DateTime.tryParse(rawHeartbeat);
-    if (heartbeat == null) return false;
-    final age = DateTime.now().toUtc().difference(heartbeat.toUtc()).inSeconds;
-    return age >= 0 && age <= 120;
-  }
-}
-
-// ── 药珠刻度环 ────────────────────────────────────────────────────
-class _BeadRing extends StatelessWidget {
-  final int? remain, total;
-  const _BeadRing({required this.remain, required this.total});
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: 140,
-      height: 140,
-      child:
-          CustomPaint(painter: _BeadRingPainter(remain: remain, total: total)),
-    );
-  }
-}
-
-class _BeadRingPainter extends CustomPainter {
-  final int? remain, total;
-  _BeadRingPainter({required this.remain, required this.total});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final cx = size.width / 2;
-    final cy = size.height / 2;
-    const r = 52.0;
-
-    // 底圆
-    canvas.drawCircle(
-        Offset(cx, cy),
-        r,
-        Paint()
-          ..color = WMColors.ink200
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 8);
-
-    // 进度弧（暖金）
-    final ratio = total != null && total! > 0 && remain != null
-        ? (remain! / total!).clamp(0.0, 1.0)
-        : 0.0;
-    final sweepAngle = 2 * 3.14159 * ratio.toDouble();
-    canvas.drawArc(
-      Rect.fromCircle(center: Offset(cx, cy), radius: r),
-      -3.14159 / 2,
-      sweepAngle,
-      false,
-      Paint()
-        ..color = remain == null
-            ? WMColors.ink300
-            : remain == 0
-                ? WMColors.danger
-                : WMColors.brandAccent
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 8
-        ..strokeCap = StrokeCap.round,
-    );
-
-    // 中心圆
-    canvas.drawCircle(
-        Offset(cx, cy), 38, Paint()..color = WMColors.brandPrimary);
-    canvas.drawCircle(Offset(cx, cy), 22,
-        Paint()..color = WMColors.brandAccent.withOpacity(0.2));
-    canvas.drawCircle(
-        Offset(cx, cy), 10, Paint()..color = WMColors.brandAccent);
-
-    // 余量文字
-    _drawText(canvas, '余量', Offset(cx, cy - 9), 10, Colors.white60);
-    _drawText(
-        canvas,
-        remain == null || total == null ? '--/--' : '$remain/$total',
-        Offset(cx, cy + 8),
-        16,
-        Colors.white);
+  String _deviceTypeLabel(Object? value) {
+    switch (value?.toString()) {
+      case 'pillbox':
+        return '醒伴智能药盒';
+      case 'clasp_bead':
+        return '醒伴药珠';
+      default:
+        return value?.toString().isNotEmpty == true ? value.toString() : '醒伴设备';
+    }
   }
 
-  void _drawText(
-      Canvas c, String text, Offset offset, double size, Color color) {
-    final tp = TextPainter(
-      text: TextSpan(
-          text: text,
-          style: TextStyle(
-              fontSize: size, color: color, fontWeight: FontWeight.w700)),
-      textDirection: TextDirection.ltr,
-    )..layout();
-    tp.paint(c, offset - Offset(tp.width / 2, tp.height / 2));
-  }
+  String? _stringOrNull(Object? value) =>
+      value == null || value.toString().trim().isEmpty
+          ? null
+          : value.toString();
 
-  @override
-  bool shouldRepaint(_BeadRingPainter old) =>
-      old.remain != remain || old.total != total;
+  String _formatDate(Object? value) {
+    final raw = _stringOrNull(value);
+    if (raw == null) return '尚未同步';
+    final parsed = DateTime.tryParse(raw);
+    if (parsed == null) return raw;
+    final local = parsed.toLocal();
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${local.year}-${two(local.month)}-${two(local.day)} '
+        '${two(local.hour)}:${two(local.minute)}';
+  }
 }

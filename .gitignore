@@ -1,6 +1,10 @@
 .env
 **/.env
 **/__pycache__/
+**/.pytest_cache/
+**/.ruff_cache/
+backups/
+.public-deployment/
 flutter_app/build/
 flutter_app/.dart_tool/
 flutter_app/.idea/
@@ -13,3 +17,7 @@ flutter_app/android/local.properties
 assets/extracted/
 assets/generated/
 assets/imagegen/
+output/
+verification/*.png
+verification/*-verification.json
+flutter_app/android/.kotlin/

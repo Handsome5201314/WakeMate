@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>醒伴 WakeMate · 管理工作台</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script defer src="/assets/vendor/lucide.min.js"></script>
+  <script defer src="/assets/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#content">跳到主要内容</a>
+  <section id="login-screen" class="login-screen">
+    <div class="login-brand"><span class="brand-symbol"><i data-lucide="pill"></i></span><span>醒伴 <b>WakeMate</b></span></div>
+    <form id="login-form" class="login-form">
+      <h1>管理工作台</h1>
+      <p class="muted">登录管理员账户</p>
+      <label>账号<input name="username" autocomplete="username" required autofocus placeholder="管理员账号"></label>
+      <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
+      <div id="login-error" class="form-error" role="alert" hidden></div>
+      <button class="button primary" type="submit"><i data-lucide="log-in"></i><span>登录</span></button>
+    </form>
+    <p class="login-footer">醒伴运营与联调工作台</p>
+  </section>
+  <div id="workspace" class="workspace" hidden>
+    <aside id="sidebar" class="sidebar" aria-label="主导航">
+      <a class="brand" href="#overview"><span class="brand-symbol"><i data-lucide="pill"></i></span><span>醒伴 <b>WakeMate</b><small>管理工作台</small></span></a>
+      <nav id="navigation"></nav>
+      <div class="sidebar-bottom"><span class="live-dot"></span><span id="sidebar-status">服务状态待检查</span></div>
+    </aside>
+    <div class="main-shell">
+      <header class="topbar">
+        <div class="topbar-left"><button id="menu-toggle" class="icon-button mobile-only" type="button" title="展开导航" aria-label="展开导航" aria-expanded="false"><i data-lucide="menu"></i></button><span class="topbar-product">管理工作台</span><span class="divider">/</span><span id="breadcrumb">总览</span></div>
+        <div class="topbar-right"><span id="signed-in-user" class="account-name">管理员</span><button id="logout" class="icon-button" type="button" title="退出登录" aria-label="退出登录"><i data-lucide="log-out"></i></button></div>
+      </header>
+      <main id="content" tabindex="-1">
+        <div class="page-heading"><div><h1 id="page-title">总览</h1><p id="page-context" class="muted"></p></div><div class="heading-actions"><span id="updated-at" class="muted"></span><button id="refresh" class="icon-button" type="button" title="刷新数据" aria-label="刷新数据"><i data-lucide="refresh-cw"></i></button></div></div>
+        <div id="patient-filter" class="patient-filter" hidden><label for="patient-select">患者</label><select id="patient-select"><option value="">选择患者</option></select><span id="patient-timezone" class="muted"></span></div>
+        <div id="view" aria-live="polite"></div>
+      </main>
+      <footer class="workspace-footer"><span>醒伴 WakeMate</span><span>时间按当前患者时区显示</span></footer>
+    </div>
+  </div>
+  <div id="sidebar-scrim" class="sidebar-scrim" hidden></div>
+  <dialog id="action-dialog" aria-labelledby="dialog-title"><div class="dialog-heading"><h2 id="dialog-title"></h2><button class="icon-button" id="dialog-close" type="button" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div><div id="dialog-body"></div></dialog>
+  <div id="toast" role="status" class="toast" hidden></div>
+</body>
+</html>

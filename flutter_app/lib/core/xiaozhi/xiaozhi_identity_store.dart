@@ -11,12 +11,41 @@ class XiaozhiIdentity {
 }
 
 class XiaozhiIdentityStore {
-  static const _deviceIdKey = 'xiaozhi_device_id';
-  static const _clientIdKey = 'xiaozhi_client_id';
+  final String userId;
   static const _uuid = Uuid();
+  static final _pendingLoads = <String, Future<XiaozhiIdentity>>{};
+  Future<XiaozhiIdentity>? _loading;
 
-  Future<XiaozhiIdentity> loadOrCreate() async {
+  XiaozhiIdentityStore({required this.userId}) {
+    if (userId.trim().isEmpty) {
+      throw ArgumentError.value(userId, 'userId', 'WakeMate account required');
+    }
+  }
+
+  String get _deviceIdKey => 'xiaozhi_${Uri.encodeComponent(userId)}_device_id';
+  String get _clientIdKey => 'xiaozhi_${Uri.encodeComponent(userId)}_client_id';
+
+  Future<XiaozhiIdentity> loadOrCreate() =>
+      _loading ??= _pendingLoads.putIfAbsent(
+        userId,
+        () => _loadOrCreate().whenComplete(() {
+          _pendingLoads.remove(userId);
+        }),
+      );
+
+  Future<XiaozhiIdentity> _loadOrCreate() async {
     final prefs = await SharedPreferences.getInstance();
+    // An older installation's global identity has no trustworthy owner. Each
+    // signed-in account activates its own device instead of inheriting it.
+    for (final key in const [
+      'xiaozhi_device_id',
+      'xiaozhi_client_id',
+      'xiaozhi_token',
+      'xiaozhi_ws_url',
+      'xiaozhi_protocol_version',
+    ]) {
+      await prefs.remove(key);
+    }
     var deviceId = prefs.getString(_deviceIdKey);
     var clientId = prefs.getString(_clientIdKey);
     deviceId ??= _createDeviceId();

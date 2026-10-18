@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 
 import 'xiaozhi_identity_store.dart';
 import 'xiaozhi_models.dart';
@@ -24,14 +23,20 @@ class XiaozhiOtaException implements Exception {
 
 class XiaozhiOtaService {
   final http.Client _client;
-  final XiaozhiIdentityStore _identityStore;
+  final XiaozhiIdentityStore identityStore;
+  bool _disposed = false;
 
-  XiaozhiOtaService({http.Client? client, XiaozhiIdentityStore? identityStore})
-      : _client = client ?? http.Client(),
-        _identityStore = identityStore ?? XiaozhiIdentityStore();
+  XiaozhiOtaService({required this.identityStore, http.Client? client})
+    : _client = client ?? http.Client();
+
+  void _ensureActive() {
+    if (_disposed) throw StateError('小智会话已结束，请重新登录后连接');
+  }
 
   Future<XiaozhiOtaConfig> _config() async {
-    final identity = await _identityStore.loadOrCreate();
+    _ensureActive();
+    final identity = await identityStore.loadOrCreate();
+    _ensureActive();
     return XiaozhiOtaConfig(
       otaUrl: Uri.parse(kXiaozhiOtaUrl),
       deviceId: identity.deviceId,
@@ -53,6 +58,7 @@ class XiaozhiOtaService {
       },
       body: jsonEncode(config.toJson()),
     );
+    _ensureActive();
     if (response.statusCode != 200) {
       throw XiaozhiOtaException(
         '小智 OTA 请求失败：${response.body.isEmpty ? '服务器未返回错误信息' : response.body}',
@@ -63,16 +69,8 @@ class XiaozhiOtaService {
     if (decoded is! Map<String, dynamic>) {
       throw const XiaozhiOtaException('小智 OTA 返回格式无效');
     }
-    final result = XiaozhiOtaResult.fromJson(decoded);
-    final prefs = await SharedPreferences.getInstance();
-    if (result.websocketUrl != null) {
-      await prefs.setString('xiaozhi_ws_url', result.websocketUrl.toString());
-    }
-    if (result.token != null && result.token!.isNotEmpty) {
-      await prefs.setString('xiaozhi_token', result.token!);
-    }
-    await prefs.setInt('xiaozhi_protocol_version', result.protocolVersion);
-    return result;
+    // OTA credentials belong to this live session and are never persisted.
+    return XiaozhiOtaResult.fromJson(decoded);
   }
 
   Future<bool> activate({required XiaozhiOtaResult ota}) async {
@@ -92,6 +90,7 @@ class XiaozhiOtaService {
       },
       body: jsonEncode(<String, dynamic>{}),
     );
+    _ensureActive();
     if (response.statusCode == 202) return false;
     if (response.statusCode != 200) {
       throw XiaozhiOtaException(
@@ -107,6 +106,7 @@ class XiaozhiOtaService {
     int? maxAttempts,
     Duration retryDelay = const Duration(seconds: 3),
   }) async {
+    _ensureActive();
     if (!initial.requiresActivation) return initial;
     final timeout = initial.activationTimeout <= Duration.zero
         ? const Duration(seconds: 30)
@@ -115,16 +115,22 @@ class XiaozhiOtaService {
     var attempts = 0;
     while (DateTime.now().isBefore(deadline) &&
         (maxAttempts == null || attempts < maxAttempts)) {
+      _ensureActive();
       attempts++;
       final activated = await activate(ota: initial);
       if (activated) return checkVersion();
       final remaining = deadline.difference(DateTime.now());
       if (remaining <= Duration.zero) break;
       await Future<void>.delayed(
-          remaining < retryDelay ? remaining : retryDelay);
+        remaining < retryDelay ? remaining : retryDelay,
+      );
     }
     throw const XiaozhiOtaException('等待小智设备激活超时，请确认已在 xiaozhi.me 输入 6 位验证码');
   }
 
-  void dispose() => _client.close();
+  void dispose() {
+    if (_disposed) return;
+    _disposed = true;
+    _client.close();
+  }
 }

@@ -134,12 +134,14 @@ class _ChatPageState extends ConsumerState<ChatPage> {
 
   void _greet() {
     Future.delayed(const Duration(milliseconds: 400), () {
+      if (!mounted) return;
       if (widget.scene == 'missed') {
         _appendAgent(
           '检测到你错过了 ${widget.drug ?? "用药"} 的服药时间…',
           XiaoxingPose.soothe,
         );
         Future.delayed(const Duration(milliseconds: 800), () {
+          if (!mounted) return;
           _sendMessage('我漏服了');
         });
       } else {
@@ -149,6 +151,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
   }
 
   void _appendAgent(String text, XiaoxingPose pose) {
+    if (!mounted) return;
     setState(() {
       _messages.add(_UiMsg(role: 'assistant', content: text, pose: pose));
       _currentPose = pose;
@@ -158,7 +161,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
 
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollCtrl.hasClients) {
+      if (mounted && _scrollCtrl.hasClients) {
         _scrollCtrl.animateTo(
           _scrollCtrl.position.maxScrollExtent,
           duration: const Duration(milliseconds: 300),
@@ -169,6 +172,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
   }
 
   Future<void> _sendMessage([String? quickText]) async {
+    if (!mounted) return;
     final text = quickText ?? _controller.text.trim();
     if (text.isEmpty || _sending) return;
 

@@ -1,5 +1,13 @@
 # WakeMate 醒伴
 
+> 公网后台已上线：[https://wakemate.tongyimoheai.top/admin](https://wakemate.tongyimoheai.top/admin)。数据仍在本机 Docker，新增独立 HTTPS 反代与隧道；详见 [公网部署与小智接入](server/PUBLIC-DEPLOYMENT.md)。
+
+> 当前业务实现位于 `server/`，通过 `compose.yml` 部署 PostgreSQL、API、提醒 Worker 和小智 `mcp-manager`。App 使用账号密码注册/登录，注册后后台刷新显示同一患者；后台保留新建和编辑患者入口。执行 `./tools/Start-WakeMate.ps1 -Build` 启动本机服务，后台为 `http://127.0.0.1:8090/admin`。在“MCP 联调”页选择患者，配置对应小智 Agent 的 WSS 接入点；连接凭证加密存储。详见 [本地部署与接入](server/LOCAL-DEPLOYMENT.md)。历史 `backend/` 不部署。
+
+> App 已支持用设备序列号和一次性绑定码认领设备，并展示同一患者的多设备清单。Wi-Fi 开发板无需蓝牙配对；只有接入醒伴上报协议后，才能提供真实心跳和药盒事件。小智官方平台设备不会自动成为醒伴设备，开发板固件接入留待下一阶段。
+
+小智 Agent 通过 MCP `tools/list` 获取工具，再以 `tools/call` 调用醒伴服务端。醒伴主动连接官方 WSS 建立双向通道，业务数据读取方向仍为 **小智 → 醒伴 MCP 工具 → 业务 API → PostgreSQL**，现有协议无需调整。Agent 提示词见 [小醒 System Prompt](xiaoxing-system-prompt.md)，已对齐五个只读工具；真实小智工具调用尚未验证。
+
 > 伴醒同行 Wake Together
 
 WakeMate 是一款把用药提醒、药珠硬件、小醒语音陪伴和家属协同放在一起的移动端产品。项目当前包含 Flutter Android 客户端、FastAPI 后端、WakeMate 视觉资产和小智官方 Server 接入层。
@@ -32,7 +40,8 @@ WakeMate/
 │   ├── lib/core/xiaozhi/          # 小智 OTA、WebSocket、语音会话
 │   ├── assets/images/             # 客户端实际使用的图片资产
 │   └── test/                     # Flutter 测试
-├── backend/                      # FastAPI 业务后端
+├── server/                       # 当前 FastAPI 业务服务与后台
+├── backend/                      # 历史 FastAPI 原型，不部署
 ├── assets/                       # 品牌和设计交付资产
 ├── docs/                         # 文档索引
 └── *.md                          # 交付、架构和开发规范
@@ -42,15 +51,15 @@ WakeMate/
 
 ### Flutter 客户端
 
-需要 Flutter 3.19+ 和 Android SDK：
+使用已配置的 Flutter 和 Android SDK：
 
 ```bash
 cd flutter_app
 flutter pub get
-flutter run --dart-define=WAKEMATE_MOCK_MODE=true
+flutter run --dart-define=WAKEMATE_MOCK_MODE=false --dart-define=WAKEMATE_BASE_URL=https://wakemate.tongyimoheai.top
 ```
 
-Mock 模式可直接浏览首页、用药计划、数据统计、设备、商城和小醒对话流程。登录页使用开发模式验证码 `123456`。
+登录页提供账号密码注册和登录。仅查看历史原型时使用 `--dart-define=WAKEMATE_MOCK_MODE=true` 的开发入口；Mock 会话和演示数据不会进入服务端。
 
 ### 连接真实后端
 
@@ -58,10 +67,10 @@ Mock 模式可直接浏览首页、用药计划、数据统计、设备、商城
 cd flutter_app
 flutter run \
   --dart-define=WAKEMATE_MOCK_MODE=false \
-  --dart-define=WAKEMATE_BASE_URL=http://10.0.2.2:8000
+  --dart-define=WAKEMATE_BASE_URL=https://wakemate.tongyimoheai.top
 ```
 
-启动 FastAPI 后端所需的环境变量见 [`backend/.env.example`](backend/.env.example)。
+当前 Docker 服务与环境配置见 [本地部署说明](server/LOCAL-DEPLOYMENT.md)。Android 模拟器调试宿主 Docker 时可覆盖为 `http://10.0.2.2:8090`；真机优先使用公网 HTTPS 来源。
 
 ### 小智官方 Server
 
@@ -77,7 +86,7 @@ flutter run \
 
 ## Android APK
 
-最新 Debug APK 在 GitHub Release 中提供：
+最新设备认领测试包为本地产物 `output/apk/WakeMate-device-claim-debug.apk`，使用 Android Debug 测试签名，尚未真机安装验收。本次源码同步不包含 APK，也未发布新版 Release。以下为历史 v1.0.0 Debug APK：
 
 **[下载 WakeMate v1.0.0 APK](https://github.com/Handsome5201314/WakeMate/releases/tag/v1.0.0)**
 
@@ -87,15 +96,17 @@ SHA256: 60844114BA8C583F312F479AFB6EB669F613419EF34CC9E7CAA884256331C1B7
 
 ## 验证命令
 
+2026-10-19 源码同步前复核：服务端 **122 passed**，Ruff 通过；Flutter **37 passed、1 skipped**（未配置的真实 HTTP 契约测试跳过）。服务端测试在隔离 PostgreSQL schema 中运行。
+
 ```bash
 cd flutter_app
 flutter analyze
 flutter test
-flutter build apk --release
+flutter build apk --release --dart-define=WAKEMATE_MOCK_MODE=false --dart-define=WAKEMATE_BASE_URL=https://wakemate.tongyimoheai.top
 ```
 
 当前仓库不提交 `build/`、`.dart_tool/`、`.env` 和 APK 构建副本；APK 作为 GitHub Release 附件发布。
 
 ## 许可证与状态
 
-这是 WakeMate 的产品原型和 Android MVP 工程。硬件 BLE、推送、生产数据库和正式账号体系需要按项目文档继续配置后再部署。
+当前为 Android MVP 与本机 Docker 业务服务：账号密码患者注册已实现，数据库为本机 PostgreSQL；计划、剂次、统计、设置、设备认领及多设备查询已接入 App。商城路由、家属授权和通知收件箱 App UI、FCM 和业务实时 WebSocket 尚未完成；实物固件及真实小智工具调用仍需联调。详细边界见 [Flutter 说明](flutter_app/README.md#当前适配边界)。

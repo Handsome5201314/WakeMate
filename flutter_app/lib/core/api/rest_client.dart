@@ -13,47 +13,78 @@ const bool kMockMode = bool.fromEnvironment(
   'WAKEMATE_MOCK_MODE',
   defaultValue: false,
 );
-// Mock builds can enter the local prototype without a phone number or OTP.
+// Mock builds can enter the local prototype without a real account.
 // The flag is intentionally gated by kMockMode so a production build can
 // never expose this path accidentally. Pass WAKEMATE_DEV_AUTH_BYPASS=false
-// when a mock build needs to exercise the OTP form itself.
+// when the local bypass must be hidden.
 const bool kDevAuthBypass = kMockMode &&
-    bool.fromEnvironment(
-      'WAKEMATE_DEV_AUTH_BYPASS',
-      defaultValue: true,
-    );
+    bool.fromEnvironment('WAKEMATE_DEV_AUTH_BYPASS', defaultValue: true);
 const String kBaseUrl = String.fromEnvironment(
   'WAKEMATE_BASE_URL',
-  defaultValue: 'http://localhost:8000',
+  defaultValue: 'https://wakemate.tongyimoheai.top',
 );
 
 const String kTokenKey = 'wm_access_token';
 const String kUserIdKey = 'wm_user_id';
 
+// AuthNotifier and the router observe this version when a session is removed.
+final sessionVersionProvider = StateProvider<int>((ref) => 0);
+
+// Serialize credential writes so an in-flight 401 cannot remove a new login.
+Future<void> _sessionMutationTail = Future<void>.value();
+Future<T> mutateStoredSession<T>(
+  Future<T> Function(SharedPreferences prefs) change,
+) {
+  final operation = _sessionMutationTail.then((_) async {
+    return change(await SharedPreferences.getInstance());
+  });
+  // The caller still receives the error. Only the queue is recovered here so
+  // a failed storage write cannot block every subsequent login/logout.
+  _sessionMutationTail = operation.then<void>((_) {}, onError: (Object _) {});
+  return operation;
+}
+
 // ── Dio Provider ──────────────────────────────────────────────────
 final dioProvider = Provider<Dio>((ref) {
-  final dio = Dio(BaseOptions(
-    baseUrl: kBaseUrl,
-    connectTimeout: const Duration(seconds: 10),
-    receiveTimeout: const Duration(seconds: 30),
-    headers: {'Content-Type': 'application/json'},
-  ));
+  final dio = Dio(
+    BaseOptions(
+      baseUrl: kBaseUrl,
+      connectTimeout: const Duration(seconds: 10),
+      receiveTimeout: const Duration(seconds: 30),
+      headers: {'Content-Type': 'application/json'},
+    ),
+  );
 
-  dio.interceptors.add(InterceptorsWrapper(
-    onRequest: (options, handler) async {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString(kTokenKey);
-      if (token != null) options.headers['Authorization'] = 'Bearer $token';
-      handler.next(options);
-    },
-    onError: (err, handler) async {
-      if (err.response?.statusCode == 401) {
+  dio.interceptors.add(
+    InterceptorsWrapper(
+      onRequest: (options, handler) async {
         final prefs = await SharedPreferences.getInstance();
-        await prefs.remove(kTokenKey);
-      }
-      handler.next(err);
-    },
-  ));
+        final token = prefs.getString(kTokenKey);
+        if (token != null) options.headers['Authorization'] = 'Bearer $token';
+        handler.next(options);
+      },
+      onError: (err, handler) async {
+        if (err.response?.statusCode == 401) {
+          final removed = await mutateStoredSession((prefs) async {
+            final token = prefs.getString(kTokenKey);
+            if (token == null ||
+                err.requestOptions.headers['Authorization'] !=
+                    'Bearer $token') {
+              return false;
+            }
+            await prefs.remove(kTokenKey);
+            await prefs.remove(kUserIdKey);
+            await prefs.remove('wm_role');
+            return true;
+          });
+          if (removed) {
+            ref.read(sessionVersionProvider.notifier).state++;
+          }
+        }
+        handler.next(err);
+      },
+    ),
+  );
 
   return dio;
 });
@@ -94,9 +125,85 @@ class WakeMateApi {
         'expires_in': 86400,
       };
     }
-    final res =
-        await _dio.post('/api/auth/login', data: {'phone': phone, 'otp': otp});
+    final res = await _dio.post(
+      '/api/auth/login',
+      data: {'phone': phone, 'otp': otp},
+    );
     return res.data as Map<String, dynamic>;
+  }
+
+  /// Sign in with the account/password contract used by the production app.
+  Future<Map<String, dynamic>> passwordLogin(
+    String username,
+    String password,
+  ) async {
+    if (kMockMode) {
+      throw StateError('Mock 构建只支持免验证演示，请使用正式版本登录账号');
+    }
+    final res = await _dio.post(
+      '/api/auth/password',
+      data: {'username': username, 'password': password},
+    );
+    return res.data as Map<String, dynamic>;
+  }
+
+  /// Create an account and return the newly created session.
+  Future<Map<String, dynamic>> register({
+    required String username,
+    required String password,
+    String? displayName,
+    String timezone = 'Asia/Shanghai',
+  }) async {
+    if (kMockMode) {
+      throw StateError('Mock 构建只支持免验证演示，请使用正式版本注册账号');
+    }
+    final data = <String, dynamic>{
+      'username': username,
+      'password': password,
+      'timezone': timezone,
+    };
+    if (displayName != null && displayName.trim().isNotEmpty) {
+      data['display_name'] = displayName.trim();
+    }
+    final res = await _dio.post('/api/auth/register', data: data);
+    return res.data as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> getMe() async {
+    final res = await _dio.get('/api/auth/me');
+    return res.data as Map<String, dynamic>;
+  }
+
+  Future<List<dynamic>> getDoses({String? date}) async {
+    if (kMockMode) {
+      final day = date == null ? DateTime.now() : DateTime.parse(date);
+      return [
+        for (final plan in _mockPlans)
+          for (final time in plan['times'] as List<String>)
+            {
+              'id': 'mock-dose-${plan['id']}-$time',
+              'dose_instance_id': 'mock-dose-${plan['id']}-$time',
+              'plan_id': plan['id'],
+              'drug_name': plan['drug_name'],
+              'dosage': plan['dosage'],
+              'scheduled_time': DateTime(
+                day.year,
+                day.month,
+                day.day,
+                int.parse(time.substring(0, 2)),
+                int.parse(time.substring(3, 5)),
+              ).toUtc().toIso8601String(),
+              'status': 'pending',
+              'actual_time': null,
+              'timezone': DateTime.now().timeZoneName,
+            },
+      ];
+    }
+    final res = await _dio.get(
+      '/api/doses',
+      queryParameters: date == null ? null : {'date': date},
+    );
+    return res.data as List<dynamic>;
   }
 
   /// Creates a local-only session for the prototype build.
@@ -128,7 +235,7 @@ class WakeMateApi {
   Future<Map<String, dynamic>> createPlan(Map<String, dynamic> data) async {
     if (kMockMode) {
       final plan = <String, dynamic>{
-        'id': 'mock-' + DateTime.now().millisecondsSinceEpoch.toString(),
+        'id': 'mock-${DateTime.now().millisecondsSinceEpoch}',
         ...data,
         'active': true,
         'synced_to_hw': false,
@@ -142,7 +249,9 @@ class WakeMateApi {
   }
 
   Future<Map<String, dynamic>> updatePlan(
-      String id, Map<String, dynamic> data) async {
+    String id,
+    Map<String, dynamic> data,
+  ) async {
     final res = await _dio.put('/api/plans/$id', data: data);
     return res.data as Map<String, dynamic>;
   }
@@ -152,9 +261,16 @@ class WakeMateApi {
   }
 
   // ── 服药记录 ─────────────────────────────────────────────────────
-  Future<Map<String, dynamic>> confirmDose(Map<String, dynamic> data) async {
+  Future<Map<String, dynamic>> confirmDose(
+    Map<String, dynamic> data, {
+    required String idempotencyKey,
+  }) async {
     if (kMockMode) return {'message': '服药记录已确认', 'data': data};
-    final res = await _dio.post('/api/records/confirm', data: data);
+    final res = await _dio.post(
+      '/api/records/confirm',
+      data: data,
+      options: Options(headers: {'Idempotency-Key': idempotencyKey}),
+    );
     return res.data as Map<String, dynamic>;
   }
 
@@ -166,8 +282,10 @@ class WakeMateApi {
 
   Future<List<dynamic>> getStats({int days = 30}) async {
     if (kMockMode) return _mockStats(days);
-    final res =
-        await _dio.get('/api/records/stats', queryParameters: {'days': days});
+    final res = await _dio.get(
+      '/api/records/stats',
+      queryParameters: {'days': days},
+    );
     return res.data as List<dynamic>;
   }
 
@@ -182,6 +300,7 @@ class WakeMateApi {
           'status': 'online',
           'bead_total': 7,
           'state': {
+            'status': 'online',
             'battery': 78,
             'bead_remain': 5,
             'last_heartbeat': DateTime.now().toUtc().toIso8601String(),
@@ -191,6 +310,23 @@ class WakeMateApi {
     }
     final res = await _dio.get('/api/device');
     return res.data as List<dynamic>;
+  }
+
+  /// Claim a provisioned device with its one-time code, never by SN alone.
+  Future<Map<String, dynamic>> bindDevice({
+    required String deviceSn,
+    required String claimCode,
+    CancelToken? cancelToken,
+  }) async {
+    if (kMockMode) {
+      throw StateError('演示模式不支持认领真实设备，请使用正式版本');
+    }
+    final res = await _dio.post(
+      '/api/device/bind',
+      data: {'device_sn': deviceSn, 'claim_code': claimCode},
+      cancelToken: cancelToken,
+    );
+    return res.data as Map<String, dynamic>;
   }
 
   // ── 用户设置 ─────────────────────────────────────────────────────
@@ -222,8 +358,10 @@ class WakeMateApi {
   Future<List<dynamic>> getShopSkus({String? category}) async {
     if (kMockMode) return const [];
     try {
-      final res = await _dio.get('/api/shop/skus',
-          queryParameters: category != null ? {'category': category} : null);
+      final res = await _dio.get(
+        '/api/shop/skus',
+        queryParameters: category != null ? {'category': category} : null,
+      );
       final data = res.data as Map<String, dynamic>;
       return data['skus'] as List<dynamic>;
     } catch (_) {
@@ -234,8 +372,10 @@ class WakeMateApi {
   Future<List<dynamic>> getShopModels({String? category}) async {
     if (kMockMode) return const [];
     try {
-      final res = await _dio.get('/api/shop/models',
-          queryParameters: category != null ? {'category': category} : null);
+      final res = await _dio.get(
+        '/api/shop/models',
+        queryParameters: category != null ? {'category': category} : null,
+      );
       final data = res.data as Map<String, dynamic>;
       return data['models'] as List<dynamic>;
     } catch (_) {
@@ -244,7 +384,8 @@ class WakeMateApi {
   }
 
   Future<Map<String, dynamic>> createShopOrder(
-      Map<String, dynamic> data) async {
+    Map<String, dynamic> data,
+  ) async {
     final res = await _dio.post('/api/shop/orders', data: data);
     return res.data as Map<String, dynamic>;
   }
@@ -311,6 +452,8 @@ List<Map<String, dynamic>> _mockStats(int days) {
       'ontime': 3,
       'late': 1,
       'missed': 0,
+      'unconfirmed': 0,
+      'pending': 0,
       'rate': rate,
       'streak_days': i + 1,
     };

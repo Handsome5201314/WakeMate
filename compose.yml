@@ -1,0 +1,86 @@
+name: wakemate
+x-app: &app
+  build: ./server
+  image: wakemate-local:1.0
+  environment: &env
+    WAKEMATE_DATABASE_URL: postgresql+asyncpg://wakemate:${WAKEMATE_DB_PASSWORD:?required}@db:5432/wakemate
+    WAKEMATE_SECRET: ${WAKEMATE_SECRET:?required}
+    WAKEMATE_ADMIN_PASSWORD: ${WAKEMATE_ADMIN_PASSWORD:?required}
+    WAKEMATE_ENVIRONMENT: local
+    WAKEMATE_NOTIFICATION_WEBHOOK: ${WAKEMATE_NOTIFICATION_WEBHOOK:-}
+    WAKEMATE_NOTIFICATION_WEBHOOK_TOKEN: ${WAKEMATE_NOTIFICATION_WEBHOOK_TOKEN:-}
+  restart: unless-stopped
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: wakemate
+      POSTGRES_PASSWORD: ${WAKEMATE_DB_PASSWORD:?required}
+      POSTGRES_DB: wakemate
+    volumes:
+      - wakemate-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U wakemate -d wakemate"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  migrate:
+    <<: *app
+    command: [sh, -c, "alembic upgrade head && python -m app.cli bootstrap"]
+    depends_on:
+      db: {condition: service_healthy}
+    restart: "no"
+  api:
+    <<: *app
+    ports: ["127.0.0.1:${WAKEMATE_PORT:-8090}:8000"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  worker:
+    <<: *app
+    command: [python, -m, app.worker]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, -m, app.cli, worker-health]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+  mcp-manager:
+    <<: *app
+    environment:
+      <<: *env
+      WAKEMATE_API_URL: http://api:8000
+    command: [python, -m, app.mcp_manager]
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -m, app.mcp_manager, --healthcheck]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+  mcp-connector:
+    <<: *app
+    profiles: [xiaozhi]
+    environment:
+      <<: *env
+      WAKEMATE_API_URL: http://api:8000
+      WAKEMATE_MCP_TOKEN: ${WAKEMATE_MCP_TOKEN:-}
+      MCP_ENDPOINT: ${WAKEMATE_MCP_ENDPOINT:-}
+    command: [python, -m, app.mcp_connector]
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -m, app.mcp_connector, --healthcheck]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+volumes:
+  wakemate-data:

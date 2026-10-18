@@ -8,10 +8,7 @@ void main() {
     if (kDevAuthBypass) return;
 
     final api = WakeMateApi(Dio());
-    await expectLater(
-      api.loginAsDev(),
-      throwsA(isA<StateError>()),
-    );
+    await expectLater(api.loginAsDev(), throwsA(isA<StateError>()));
   });
 
   test('mock build creates a local session without network', () async {
@@ -23,5 +20,18 @@ void main() {
     expect(session['access_token'], 'dev-wakemate-token');
     expect(session['user_id'], 'dev-user');
     expect(session['role'], 'patient');
+  });
+
+  test('mock account password flows cannot write real accounts', () async {
+    if (!kMockMode) return;
+    final api = WakeMateApi(Dio());
+    await expectLater(
+      api.passwordLogin('demo', 'demo-password-2026'),
+      throwsA(isA<StateError>()),
+    );
+    await expectLater(
+      api.register(username: 'demo', password: 'demo-password-2026'),
+      throwsA(isA<StateError>()),
+    );
   });
 }

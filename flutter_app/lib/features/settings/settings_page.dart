@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/theme/wakemate_theme.dart';
 import '../../core/api/rest_client.dart';
+import '../../shared/providers/auth_provider.dart';
 
 class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({super.key});
@@ -23,8 +24,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   TimeOfDay _quietStart = const TimeOfDay(hour: 22, minute: 0);
   TimeOfDay _quietEnd = const TimeOfDay(hour: 7, minute: 0);
   bool _deviceLoading = true;
-  bool _deviceConnected = false;
-  int? _deviceBattery;
+  int _deviceCount = 0;
+  int _onlineDeviceCount = 0;
+  bool _deviceLoadFailed = false;
+  bool _loggingOut = false;
 
   @override
   void initState() {
@@ -37,27 +40,22 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     try {
       final devices = await ref.read(apiProvider).getDevices();
       if (!mounted) return;
-      Map<String, dynamic>? device;
-      for (final item in devices) {
-        if (item is Map<String, dynamic>) {
-          device = item;
-          break;
-        }
-      }
-      final rawState = device?['state'];
-      final state =
-          rawState is Map ? Map<String, dynamic>.from(rawState) : device;
+      final validDevices = devices.whereType<Map>().toList(growable: false);
+      final onlineCount = validDevices.where((device) {
+        final state = device['state'];
+        return state is Map && state['status']?.toString() == 'online';
+      }).length;
       setState(() {
         _deviceLoading = false;
-        _deviceConnected = _isDeviceOnline(state);
-        _deviceBattery = (state?['battery'] as num?)?.toInt();
+        _deviceCount = validDevices.length;
+        _onlineDeviceCount = onlineCount;
+        _deviceLoadFailed = false;
       });
     } catch (_) {
       if (!mounted) return;
       setState(() {
         _deviceLoading = false;
-        _deviceConnected = false;
-        _deviceBattery = null;
+        _deviceLoadFailed = true;
       });
     }
   }
@@ -96,17 +94,6 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     }
   }
 
-  bool _isDeviceOnline(Map<String, dynamic>? state) {
-    if (state == null) return false;
-    if (state['status']?.toString() == 'online') return true;
-    final rawHeartbeat = state['last_heartbeat']?.toString();
-    final heartbeat =
-        rawHeartbeat == null ? null : DateTime.tryParse(rawHeartbeat);
-    if (heartbeat == null) return false;
-    return DateTime.now().toUtc().difference(heartbeat.toUtc()).inSeconds <=
-        120;
-  }
-
   TimeOfDay _parseTime(String s) {
     final parts = s.split(':');
     return TimeOfDay(hour: int.parse(parts[0]), minute: int.parse(parts[1]));
@@ -141,17 +128,27 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                     icon: Icons.device_hub_outlined,
                     iconBg: WMColors.brandPrimarySoft,
                     iconColor: WMColors.brandPrimaryStrong,
-                    title: '醒伴药珠',
+                    title: '醒伴设备',
                     sub: _deviceLoading
                         ? '设备状态加载中…'
-                        : _deviceBattery == null
-                            ? (_deviceConnected ? '在线 · 电量未知' : '离线 · 电量未知')
-                            : '${_deviceConnected ? "在线" : "离线"} · 电量 $_deviceBattery%',
+                        : _deviceLoadFailed
+                            ? '设备数据暂不可用'
+                            : _deviceCount == 0
+                                ? '尚未绑定醒伴设备'
+                                : '$_deviceCount 台设备 · $_onlineDeviceCount 台在线',
                     trailing: _deviceLoading
                         ? null
-                        : _connectionChip(
-                            _deviceConnected ? '已连接' : '未连接', _deviceConnected),
-                    onTap: () => context.push('/device'),
+                        : _deviceLoadFailed
+                            ? null
+                            : _connectionChip(
+                                _deviceCount == 0
+                                    ? '未绑定'
+                                    : '$_onlineDeviceCount 台在线',
+                                _onlineDeviceCount > 0),
+                    onTap: () async {
+                      await context.push('/device');
+                      if (mounted) _loadDeviceSummary();
+                    },
                   ),
                   _tappable(
                     icon: Icons.light_mode_outlined,
@@ -292,13 +289,25 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                     sub: '产品功能与操作指引',
                     onTap: () => _snack('使用说明（即将上线）'),
                   ),
+                  if (kMockMode)
+                    _tappable(
+                      icon: Icons.delete_outline,
+                      iconBg: const Color(0xFFFFECEB),
+                      iconColor: WMColors.danger,
+                      title: '清除本地演示设置',
+                      sub: '清除提醒设置并退出演示账户',
+                      onTap: () => _confirmClear(),
+                    ),
+                ]),
+
+                _secTitle('账户'),
+                _group([
                   _tappable(
-                    icon: Icons.delete_outline,
-                    iconBg: const Color(0xFFFFECEB),
-                    iconColor: WMColors.danger,
-                    title: '清除演示数据',
-                    sub: '重置本地存储数据',
-                    onTap: () => _confirmClear(),
+                    icon: Icons.logout,
+                    iconBg: WMColors.brandPrimarySoft,
+                    iconColor: WMColors.brandPrimary,
+                    title: _loggingOut ? '正在退出…' : '退出登录',
+                    onTap: _logout,
                   ),
                 ]),
 
@@ -582,11 +591,12 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       );
 
   Future<void> _confirmClear() async {
+    if (!kMockMode || _loggingOut) return;
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
-        title: const Text('清除演示数据'),
-        content: const Text('确认清除所有本地数据？'),
+        title: const Text('清除本地演示设置'),
+        content: const Text('清除本地提醒设置并退出演示账户？'),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(context, false),
@@ -600,9 +610,30 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       ),
     );
     if (ok == true) {
-      final p = await SharedPreferences.getInstance();
-      await p.clear();
+      await _logout(clearDemoSettings: true);
+    }
+  }
+
+  Future<void> _logout({bool clearDemoSettings = false}) async {
+    if (_loggingOut) return;
+    setState(() => _loggingOut = true);
+    try {
+      await ref.read(authProvider.notifier).logout();
+      if (clearDemoSettings && kMockMode) {
+        final prefs = await SharedPreferences.getInstance();
+        for (final key in const [
+          'wm_family_push',
+          'wm_quiet_start',
+          'wm_quiet_end',
+        ]) {
+          await prefs.remove(key);
+        }
+      }
       if (mounted) context.go('/login');
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _loggingOut = false);
+      _snack('退出登录失败，请重试');
     }
   }
 }

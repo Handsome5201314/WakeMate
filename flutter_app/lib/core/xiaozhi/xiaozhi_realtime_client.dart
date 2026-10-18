@@ -23,6 +23,9 @@ class XiaozhiRealtimeClient {
   int _binaryProtocolVersion = 1;
   StreamSubscription<dynamic>? _subscription;
   int _connectionGeneration = 0;
+  bool _disposed = false;
+  Future<void>? _disposeFuture;
+  Completer<void>? _handshake;
   final _textController = StreamController<XiaozhiTextEvent>.broadcast();
   final _audioController = StreamController<XiaozhiAudioEvent>.broadcast();
   final _stateController = StreamController<XiaozhiConnectionState>.broadcast();
@@ -34,20 +37,24 @@ class XiaozhiRealtimeClient {
   int get serverSampleRate => _serverSampleRate;
   int get serverFrameDuration => _serverFrameDuration;
   bool get isReady =>
-      _state == XiaozhiConnectionState.ready ||
-      _state == XiaozhiConnectionState.listening ||
-      _state == XiaozhiConnectionState.speaking;
+      !_disposed &&
+      (_state == XiaozhiConnectionState.ready ||
+          _state == XiaozhiConnectionState.listening ||
+          _state == XiaozhiConnectionState.speaking);
 
-  Future<void> connect(
-      {required XiaozhiOtaResult ota,
-      required String deviceId,
-      required String clientId}) async {
+  Future<void> connect({
+    required XiaozhiOtaResult ota,
+    required String deviceId,
+    required String clientId,
+  }) async {
+    _ensureActive();
     final url = ota.websocketUrl;
     if (url == null) {
       throw const XiaozhiRealtimeException('小智 OTA 未返回可用的 WebSocket 地址');
     }
 
     await disconnect();
+    _ensureActive();
     _serverSampleRate = 16000;
     _serverFrameDuration = 60;
     _binaryProtocolVersion = ota.protocolVersion;
@@ -76,32 +83,36 @@ class XiaozhiRealtimeClient {
     _setState(XiaozhiConnectionState.handshaking);
 
     final hello = Completer<void>();
+    _handshake = hello;
     _subscription = channel.stream.listen(
       (message) {
-        if (generation != _connectionGeneration) return;
+        if (_disposed || generation != _connectionGeneration) return;
         if (message is String) {
           _onText(message, hello);
         } else if (message is List<int>) {
           final packet = _decodeAudio(Uint8List.fromList(message));
           if (packet != null) {
-            _audioController.add(XiaozhiAudioEvent(
-              packet,
-              sampleRate: _serverSampleRate,
-              frameDuration: _serverFrameDuration,
-            ));
+            _audioController.add(
+              XiaozhiAudioEvent(
+                packet,
+                sampleRate: _serverSampleRate,
+                frameDuration: _serverFrameDuration,
+              ),
+            );
           }
         }
       },
       onError: (Object error, StackTrace stack) {
-        if (generation != _connectionGeneration) return;
+        if (_disposed || generation != _connectionGeneration) return;
         if (!hello.isCompleted) hello.completeError(error, stack);
         _setState(XiaozhiConnectionState.error);
       },
       onDone: () {
-        if (generation != _connectionGeneration) return;
+        if (_disposed || generation != _connectionGeneration) return;
         if (!hello.isCompleted) {
           hello.completeError(
-              const XiaozhiRealtimeException('小智 WebSocket 在握手前断开'));
+            const XiaozhiRealtimeException('小智 WebSocket 在握手前断开'),
+          );
         }
         _setState(XiaozhiConnectionState.disconnected);
       },
@@ -122,9 +133,15 @@ class XiaozhiRealtimeClient {
         },
       });
       await hello.future.timeout(const Duration(seconds: 10));
+      _ensureActive();
+      if (generation != _connectionGeneration) {
+        throw StateError('小智连接已被新的会话替代');
+      }
+      if (identical(_handshake, hello)) _handshake = null;
       _setState(XiaozhiConnectionState.ready);
     } catch (error) {
-      await disconnect();
+      if (generation == _connectionGeneration) await disconnect();
+      if (error is StateError) rethrow;
       if (error is XiaozhiRealtimeException) rethrow;
       throw XiaozhiRealtimeException('小智 WebSocket 握手失败：$error');
     }
@@ -174,7 +191,8 @@ class XiaozhiRealtimeClient {
       if (json['type'] == 'hello') {
         if (json['transport'] != 'websocket') {
           final error = XiaozhiRealtimeException(
-              '小智 WebSocket 握手返回了不支持的 transport：${json['transport']}');
+            '小智 WebSocket 握手返回了不支持的 transport：${json['transport']}',
+          );
           if (hello != null && !hello.isCompleted) {
             hello.completeError(error);
           }
@@ -217,21 +235,13 @@ class XiaozhiRealtimeClient {
 
   Future<void> sendText(String text) async {
     _ensureReady();
-    _send({
-      'type': 'listen',
-      'state': 'detect',
-      'text': text,
-    });
+    _send({'type': 'listen', 'state': 'detect', 'text': text});
   }
 
   Future<void> startListening() async {
     _ensureReady();
     _setState(XiaozhiConnectionState.listening);
-    _send({
-      'type': 'listen',
-      'state': 'start',
-      'mode': 'manual',
-    });
+    _send({'type': 'listen', 'state': 'start', 'mode': 'manual'});
   }
 
   Future<void> stopListening() async {
@@ -272,14 +282,19 @@ class XiaozhiRealtimeClient {
   }
 
   void abort() {
-    if (_channel == null) return;
+    if (_disposed || _channel == null) return;
     _send({'type': 'abort', 'reason': 'user_abort'});
   }
 
   void _ensureReady() {
+    _ensureActive();
     if (!isReady || _channel == null) {
       throw const XiaozhiRealtimeException('小智连接尚未就绪');
     }
+  }
+
+  void _ensureActive() {
+    if (_disposed) throw StateError('小智连接已结束，请重新登录后连接');
   }
 
   void _send(Map<String, dynamic> message) {
@@ -289,6 +304,7 @@ class XiaozhiRealtimeClient {
   }
 
   void _setState(XiaozhiConnectionState value) {
+    if (_disposed) return;
     if (_state == value) return;
     _state = value;
     if (!_stateController.isClosed) _stateController.add(value);
@@ -296,6 +312,11 @@ class XiaozhiRealtimeClient {
 
   Future<void> disconnect() async {
     _connectionGeneration++;
+    final handshake = _handshake;
+    _handshake = null;
+    if (handshake != null && !handshake.isCompleted) {
+      handshake.completeError(StateError('小智握手已取消'));
+    }
     final subscription = _subscription;
     _subscription = null;
     final channel = _channel;
@@ -306,7 +327,14 @@ class XiaozhiRealtimeClient {
     _setState(XiaozhiConnectionState.disconnected);
   }
 
-  Future<void> dispose() async {
+  Future<void> dispose() {
+    if (_disposeFuture != null) return _disposeFuture!;
+    _disposed = true;
+    _state = XiaozhiConnectionState.disconnected;
+    return _disposeFuture = _disposeResources();
+  }
+
+  Future<void> _disposeResources() async {
     await disconnect();
     await _textController.close();
     await _audioController.close();

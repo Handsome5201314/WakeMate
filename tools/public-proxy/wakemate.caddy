@@ -1,0 +1,13 @@
+wakemate.tongyimoheai.top {
+    header {
+        Strict-Transport-Security "max-age=15552000"
+        X-Frame-Options "DENY"
+        -Server
+    }
+    reverse_proxy 127.0.0.1:18090 {
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+        header_up -Forwarded
+    }
+}

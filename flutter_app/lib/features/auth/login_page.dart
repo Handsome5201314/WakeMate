@@ -1,5 +1,5 @@
 // lib/features/auth/login_page.dart
-// 手机号 + OTP 登录页
+// 账号密码登录与注册页
 // 醒伴 WakeMate Flutter APP
 
 import 'package:flutter/material.dart';
@@ -10,7 +10,6 @@ import 'package:dio/dio.dart';
 
 import '../../core/theme/wakemate_theme.dart';
 import '../../core/api/rest_client.dart';
-import '../../core/api/ws_client.dart';
 import '../../shared/providers/auth_provider.dart';
 import '../../shared/widgets/xiaoxing_avatar.dart';
 
@@ -22,69 +21,51 @@ class LoginPage extends ConsumerStatefulWidget {
 }
 
 class _LoginPageState extends ConsumerState<LoginPage> {
-  final _phoneCtrl = TextEditingController();
-  final _otpCtrl = TextEditingController();
-  bool _otpSent = false;
+  final _usernameCtrl = TextEditingController();
+  final _passwordCtrl = TextEditingController();
+  final _displayNameCtrl = TextEditingController();
+  bool _registering = false;
+  bool _obscurePassword = true;
   bool _loading = false;
-  String? _otpHint;
 
   @override
   void dispose() {
-    _phoneCtrl.dispose();
-    _otpCtrl.dispose();
+    _usernameCtrl.dispose();
+    _passwordCtrl.dispose();
+    _displayNameCtrl.dispose();
     super.dispose();
   }
 
-  Future<void> _sendOtp() async {
-    if (_phoneCtrl.text.trim().length != 11) {
-      _showError('请输入正确的手机号');
-      return;
-    }
-    setState(() => _loading = true);
-    try {
-      final result =
-          await ref.read(apiProvider).sendOtp(_phoneCtrl.text.trim());
-      final devOtp = (result['data'] as Map?)?['otp'] as String?;
-      setState(() {
-        _otpSent = true;
-        _loading = false;
-        _otpHint = devOtp == null ? null : '开发模式验证码：$devOtp';
-      });
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(devOtp == null ? '验证码已发送' : '验证码已发送（开发模式：$devOtp）'),
-            duration: const Duration(seconds: 3),
-          ),
-        );
-      }
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _loading = false);
-      _showError('验证码发送失败：' + _errorMessage(e));
-    }
-  }
-
   Future<void> _login() async {
-    if (_otpCtrl.text.trim().length < 4) {
-      _showError('请输入验证码');
+    final username = _usernameCtrl.text.trim();
+    final password = _passwordCtrl.text;
+    if (!RegExp(r'^[A-Za-z0-9_]{3,32}$').hasMatch(username)) {
+      _showError('账号需为 3-32 位字母、数字或下划线');
+      return;
+    }
+    if (password.length < 12) {
+      _showError('密码至少需要 12 位');
       return;
     }
     setState(() => _loading = true);
     try {
-      await ref.read(authProvider.notifier).login(
-            _phoneCtrl.text.trim(),
-            _otpCtrl.text.trim(),
-          );
-      final userId = ref.read(authProvider).valueOrNull?.userId;
-      if (userId != null) {
-        WakeMateWsClient.instance.connect(userId: userId);
+      final auth = ref.read(authProvider.notifier);
+      if (_registering) {
+        await auth.register(
+          username: username,
+          password: password,
+          displayName: _displayNameCtrl.text.trim().isEmpty
+              ? null
+              : _displayNameCtrl.text.trim(),
+        );
+      } else {
+        await auth.loginWithPassword(username, password);
       }
       if (mounted) context.go('/home');
     } catch (e) {
       if (!mounted) return;
       setState(() => _loading = false);
-      _showError('登录失败：' + _errorMessage(e));
+      _showError((_registering ? '注册失败：' : '登录失败：') + _errorMessage(e));
     }
   }
 
@@ -92,10 +73,6 @@ class _LoginPageState extends ConsumerState<LoginPage> {
     setState(() => _loading = true);
     try {
       await ref.read(authProvider.notifier).loginAsDev();
-      final userId = ref.read(authProvider).valueOrNull?.userId;
-      if (userId != null) {
-        WakeMateWsClient.instance.connect(userId: userId);
-      }
       if (mounted) context.go('/home');
     } catch (e) {
       if (!mounted) return;
@@ -105,11 +82,20 @@ class _LoginPageState extends ConsumerState<LoginPage> {
   }
 
   String _errorMessage(Object error) {
+    if (error is StateError) return error.message.toString();
     if (error is DioException) {
-      final detail = error.response?.data is Map
-          ? (error.response?.data as Map)['detail']?.toString()
-          : null;
-      return detail ?? '网络不可用，请稍后重试';
+      if (error.response?.statusCode == 401) return '账号或密码错误，请重新输入';
+      if (error.response?.statusCode == 409) return '账号已存在，请直接登录';
+      if (error.response?.statusCode == 429) return '操作过于频繁，请稍后重试';
+      final data = error.response?.data;
+      final detail = data is Map ? data['detail'] : null;
+      if (detail is String && detail.isNotEmpty) return detail;
+      if (detail is List && detail.isNotEmpty) {
+        final first = detail.first;
+        if (first is Map && first['msg'] != null)
+          return first['msg'].toString();
+      }
+      return '网络不可用，请稍后重试';
     }
     return '请稍后重试';
   }
@@ -192,10 +178,7 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                     const Text(
                       'Wake together · 每一个夜晚都有回应',
                       textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: Color(0xB3FFFFFF),
-                        fontSize: 13,
-                      ),
+                      style: TextStyle(color: Color(0xB3FFFFFF), fontSize: 13),
                     ),
                     const SizedBox(height: WMSpacing.xl),
                     Container(
@@ -221,10 +204,8 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                               ),
                               const SizedBox(width: WMSpacing.sm),
                               Text(
-                                kDevAuthBypass ? '先进入体验' : '手机号登录',
-                                style: Theme.of(context)
-                                    .textTheme
-                                    .titleMedium
+                                _registering ? '创建醒伴账号' : '账号登录',
+                                style: Theme.of(context).textTheme.titleMedium
                                     ?.copyWith(
                                       color: WMColors.ink900,
                                       fontWeight: FontWeight.w700,
@@ -235,7 +216,7 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                           if (kDevAuthBypass) ...[
                             const SizedBox(height: WMSpacing.sm),
                             const Text(
-                              '当前为本地开发环境，无需手机号和验证码即可体验完整界面。',
+                              '当前为本地开发环境，可免验证体验完整界面。',
                               style: TextStyle(
                                 color: WMColors.ink500,
                                 fontSize: 13,
@@ -268,10 +249,11 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                                 children: [
                                   Expanded(child: Divider()),
                                   Padding(
-                                    padding:
-                                        EdgeInsets.symmetric(horizontal: 12),
+                                    padding: EdgeInsets.symmetric(
+                                      horizontal: 12,
+                                    ),
                                     child: Text(
-                                      '或使用手机号登录',
+                                      '或使用账号密码',
                                       style: TextStyle(
                                         color: WMColors.ink500,
                                         fontSize: 12,
@@ -284,81 +266,105 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                             ),
                           ],
                           TextField(
-                            controller: _phoneCtrl,
-                            keyboardType: TextInputType.phone,
-                            maxLength: 11,
+                            controller: _usernameCtrl,
+                            keyboardType: TextInputType.text,
+                            maxLength: 32,
+                            autocorrect: false,
                             decoration: const InputDecoration(
-                              labelText: '手机号',
-                              prefixIcon: Icon(Icons.phone_outlined),
-                              prefixText: '+86  ',
+                              labelText: '账号',
+                              hintText: '字母、数字或下划线',
+                              prefixIcon: Icon(Icons.person_outline),
                               counterText: '',
                             ),
                           ),
                           const SizedBox(height: WMSpacing.md),
-                          if (_otpSent) ...[
-                            if (_otpHint != null)
-                              Padding(
-                                padding: const EdgeInsets.only(
-                                  bottom: WMSpacing.sm,
-                                ),
-                                child: Text(
-                                  _otpHint!,
-                                  style: const TextStyle(
-                                    fontSize: 12,
-                                    color: WMColors.brandSecondary,
-                                  ),
-                                ),
-                              ),
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: TextField(
-                                    controller: _otpCtrl,
-                                    keyboardType: TextInputType.number,
-                                    maxLength: 6,
-                                    decoration: const InputDecoration(
-                                      labelText: '验证码',
-                                      prefixIcon: Icon(Icons.sms_outlined),
-                                      counterText: '',
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(width: WMSpacing.sm),
-                                TextButton(
-                                  onPressed: _loading ? null : _sendOtp,
-                                  child: const Text('重新发送'),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: WMSpacing.lg),
-                            SizedBox(
-                              height: 50,
-                              child: ElevatedButton.icon(
-                                onPressed: _loading ? null : _login,
-                                icon: _loading
-                                    ? const SizedBox(
-                                        width: 20,
-                                        height: 20,
-                                        child: CircularProgressIndicator(
-                                          color: Colors.white,
-                                          strokeWidth: 2,
-                                        ),
-                                      )
-                                    : const Icon(Icons.login_rounded),
-                                label: Text(_loading ? '正在登录…' : '登录'),
+                          if (_registering) ...[
+                            TextField(
+                              controller: _displayNameCtrl,
+                              maxLength: 100,
+                              decoration: const InputDecoration(
+                                labelText: '昵称（可选）',
+                                prefixIcon: Icon(Icons.badge_outlined),
+                                counterText: '',
                               ),
                             ),
-                          ] else ...[
-                            SizedBox(
-                              height: 50,
-                              child: ElevatedButton.icon(
-                                onPressed: _loading ? null : _sendOtp,
-                                icon: const Icon(Icons.sms_outlined),
-                                label: const Text('获取验证码'),
-                              ),
-                            ),
+                            const SizedBox(height: WMSpacing.md),
                           ],
+                          TextField(
+                            controller: _passwordCtrl,
+                            obscureText: _obscurePassword,
+                            maxLength: 128,
+                            onSubmitted: (_) {
+                              if (!_loading && !kMockMode) _login();
+                            },
+                            decoration: InputDecoration(
+                              labelText: '密码',
+                              hintText: '至少 12 位',
+                              prefixIcon: const Icon(Icons.lock_outline),
+                              counterText: '',
+                              suffixIcon: IconButton(
+                                tooltip: _obscurePassword ? '显示密码' : '隐藏密码',
+                                onPressed: () => setState(() {
+                                  _obscurePassword = !_obscurePassword;
+                                }),
+                                icon: Icon(
+                                  _obscurePassword
+                                      ? Icons.visibility_outlined
+                                      : Icons.visibility_off_outlined,
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: WMSpacing.lg),
+                          SizedBox(
+                            height: 50,
+                            child: ElevatedButton.icon(
+                              onPressed: _loading || kMockMode ? null : _login,
+                              icon: _loading
+                                  ? const SizedBox(
+                                      width: 20,
+                                      height: 20,
+                                      child: CircularProgressIndicator(
+                                        color: Colors.white,
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : Icon(
+                                      _registering
+                                          ? Icons.person_add_alt_1
+                                          : Icons.login_rounded,
+                                    ),
+                              label: Text(
+                                _loading
+                                    ? (_registering ? '正在注册…' : '正在登录…')
+                                    : (_registering ? '注册并进入' : '登录'),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: WMSpacing.sm),
+                          TextButton(
+                            onPressed: _loading || kMockMode
+                                ? null
+                                : () => setState(() {
+                                    _registering = !_registering;
+                                    _passwordCtrl.clear();
+                                  }),
+                            child: Text(
+                              _registering ? '已有账号，直接登录' : '没有账号，注册新账号',
+                            ),
+                          ),
                           const SizedBox(height: WMSpacing.md),
+                          if (kMockMode)
+                            const Padding(
+                              padding: EdgeInsets.only(bottom: WMSpacing.sm),
+                              child: Text(
+                                '演示版本不会创建真实账号。账号注册和密码登录请使用正式版本。',
+                                style: TextStyle(
+                                  color: WMColors.ink500,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ),
                           const Text(
                             '登录即表示同意《用户协议》和《隐私政策》',
                             textAlign: TextAlign.center,

@@ -15,11 +15,7 @@ class AuthState {
   final String? userId;
   final String? role;
 
-  const AuthState({
-    required this.status,
-    this.userId,
-    this.role,
-  });
+  const AuthState({required this.status, this.userId, this.role});
 
   bool get isAuthenticated => status == AuthStatus.authenticated;
 
@@ -35,6 +31,7 @@ class AuthState {
 class AuthNotifier extends AsyncNotifier<AuthState> {
   @override
   Future<AuthState> build() async {
+    ref.watch(sessionVersionProvider);
     // 启动时检查本地 token
     final prefs = await SharedPreferences.getInstance();
     final token = prefs.getString(kTokenKey);
@@ -61,6 +58,42 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     }
   }
 
+  Future<void> loginWithPassword(String username, String password) async {
+    state = const AsyncLoading();
+    try {
+      final data = await ref
+          .read(apiProvider)
+          .passwordLogin(username.trim(), password);
+      await _setAuthenticatedSession(data);
+    } catch (e) {
+      state = AsyncData(const AuthState(status: AuthStatus.unauthenticated));
+      rethrow;
+    }
+  }
+
+  Future<void> register({
+    required String username,
+    required String password,
+    String? displayName,
+    String timezone = 'Asia/Shanghai',
+  }) async {
+    state = const AsyncLoading();
+    try {
+      final data = await ref
+          .read(apiProvider)
+          .register(
+            username: username.trim(),
+            password: password,
+            displayName: displayName,
+            timezone: timezone,
+          );
+      await _setAuthenticatedSession(data);
+    } catch (e) {
+      state = AsyncData(const AuthState(status: AuthStatus.unauthenticated));
+      rethrow;
+    }
+  }
+
   Future<void> loginAsDev() async {
     state = const AsyncLoading();
     try {
@@ -79,23 +112,27 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
       throw const FormatException('登录响应缺少会话信息');
     }
 
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(kTokenKey, accessToken);
-    await prefs.setString(kUserIdKey, userId);
-    await prefs.setString('wm_role', data['role'] as String? ?? 'patient');
+    await mutateStoredSession((prefs) async {
+      await prefs.setString(kTokenKey, accessToken);
+      await prefs.setString(kUserIdKey, userId);
+      await prefs.setString('wm_role', data['role'] as String? ?? 'patient');
+    });
 
-    state = AsyncData(AuthState(
-      status: AuthStatus.authenticated,
-      userId: userId,
-      role: data['role'] as String? ?? 'patient',
-    ));
+    state = AsyncData(
+      AuthState(
+        status: AuthStatus.authenticated,
+        userId: userId,
+        role: data['role'] as String? ?? 'patient',
+      ),
+    );
   }
 
   Future<void> logout() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(kTokenKey);
-    await prefs.remove(kUserIdKey);
-    await prefs.remove('wm_role');
+    await mutateStoredSession((prefs) async {
+      await prefs.remove(kTokenKey);
+      await prefs.remove(kUserIdKey);
+      await prefs.remove('wm_role');
+    });
     state = const AsyncData(AuthState(status: AuthStatus.unauthenticated));
   }
 }
